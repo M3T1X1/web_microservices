@@ -90,3 +90,61 @@ Opisz dane w pamięci, ich reset przy restarcie i brak wspólnego stanu między 
 - AI: narzędzie, zakres pomocy i sposób weryfikacji albo „nie korzystano”.
 
 Przed oddaniem sprawdź instalację w nowym środowisku oraz kompletność README. Nie dołączaj `.venv`, cache Pythona ani sekretów. Każda osoba w parze samodzielnie wyjaśnia kod i wykonuje małą zmianę podczas odbioru. LAB1 to pierwsza usługa; wymaganie co najmniej dwóch różnych usług na osobę dotyczy całego projektu semestralnego.
+
+## 8. Podział systemu na usługi
+
+### Serwis Stanów Magazynowych (Inventory)
+
+**Usługa odpowiada za:**
+
+- Trzymanie informacji, ile sztuk danego towaru jest w magazynie.
+- Pamiętanie, na której dokładnie półce lub regale leży dany produkt.
+- Zmianę liczby sztuk, gdy towar przybywa, ubywa lub zostaje zarezerwowany pod zamówienie.
+
+**Usługa nie odpowiada za:**
+
+- Sprawdzanie dostaw przy rampie rozładunkowej (od tego jest Serwis Przyjęć).
+- Tworzenie list zakupów i pakowanie paczek (od tego jest Serwis Realizacji Zamówień).
+- Generowanie listów przewozowych dla kurierów (od tego jest Serwis Wysyłki).
+
+### Serwis Przyjęć Towaru (Inbound)
+
+**Usługa odpowiada za:**
+
+- Rejestrowanie przyjazdu dostaw od producentów lub hurtowni.
+- Sprawdzanie, czy przyjechało dokładnie tyle towaru, ile zamówiono i czy nic nie jest uszkodzone.
+- Wystawianie dokumentu przyjęcia (PZ) i zgłaszanie do systemu, że towar trafił na stan.
+
+**Usługa nie odpowiada za:**
+
+- Trzymanie ogólnej bazy wszystkich stanów i półek (po przyjęciu po prostu zgłasza to do Serwisu Stanów).
+- Obsługę zamówień wychodzących do klientów.
+- Kontakt z firmami kurierskimi odbierającymi gotowe paczki.
+
+### Serwis Realizacji Zamówień (Outbound)
+
+**Usługa odpowiada za:**
+
+- Przyjmowanie nowych zamówień do realizacji (np. ze sklepu internetowego).
+- Tworzenie listy dla magazyniera: co i z jakiej półki ma przynieść (kompletacja).
+- Obsługę stanowiska pakowania i oznaczanie zamówienia jako gotowe w kartonie.
+
+**Usługa nie odpowiada za:**
+
+- Pilnowanie globalnej bazy magazynowej (tylko odpytuje Serwis Stanów, czy dany produkt jest dostępny).
+- Zamawianie podjazdu kuriera i drukowanie etykiet adresowych.
+- Rejestrowanie nowych dostaw od hurtowni.
+
+### Serwis Wysyłki i Kurierów (Shipping)
+
+**Usługa odpowiada za:**
+
+- Generowanie etykiet kurierskich (np. InPost, DPD, DHL).
+- Nadawanie numerów do śledzenia przesyłki (tracking).
+- Rejestrowanie momentu, w którym gotowa paczka została fizycznie wydana kierowcy.
+
+**Usługa nie odpowiada za:**
+
+- Chodzenie po magazynie i pakowanie towaru do kartonu.
+- Sprawdzanie, czy na półkach jest wystarczająca liczba produktów.
+- Odbieranie palet z dostawami od dostawców.
