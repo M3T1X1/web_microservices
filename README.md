@@ -96,55 +96,128 @@ Przed oddaniem sprawdź instalację w nowym środowisku oraz kompletność READM
 ### Serwis Stanów Magazynowych (Inventory)
 
 **Usługa odpowiada za:**
-
-- Trzymanie informacji, ile sztuk danego towaru jest w magazynie.
-- Pamiętanie, na której dokładnie półce lub regale leży dany produkt.
-- Zmianę liczby sztuk, gdy towar przybywa, ubywa lub zostaje zarezerwowany pod zamówienie.
+- Przechowywanie ilości i lokalizacji produktów.
+- Rezerwowanie towaru dla zamówień i zwalnianie rezerwacji.
+- Aktualizowanie stanów przy przyjęciu, przesunięciu i wydaniu towaru.
 
 **Usługa nie odpowiada za:**
-
-- Sprawdzanie dostaw przy rampie rozładunkowej (od tego jest Serwis Przyjęć).
-- Tworzenie list zakupów i pakowanie paczek (od tego jest Serwis Realizacji Zamówień).
-- Generowanie listów przewozowych dla kurierów (od tego jest Serwis Wysyłki).
+- Rejestrowanie dostaw od dostawców.
+- Kompletowanie i pakowanie zamówień.
+- Obsługę wysyłki paczek.
 
 ### Serwis Przyjęć Towaru (Inbound)
 
 **Usługa odpowiada za:**
-
-- Rejestrowanie przyjazdu dostaw od producentów lub hurtowni.
-- Sprawdzanie, czy przyjechało dokładnie tyle towaru, ile zamówiono i czy nic nie jest uszkodzone.
-- Wystawianie dokumentu przyjęcia (PZ) i zgłaszanie do systemu, że towar trafił na stan.
+- Rejestrowanie dostaw i danych dostawcy.
+- Zapisywanie otrzymanych ilości i lokalizacji docelowych.
+- Zgłaszanie przyjęcia towaru do Inventory.
 
 **Usługa nie odpowiada za:**
-
-- Trzymanie ogólnej bazy wszystkich stanów i półek (po przyjęciu po prostu zgłasza to do Serwisu Stanów).
-- Obsługę zamówień wychodzących do klientów.
-- Kontakt z firmami kurierskimi odbierającymi gotowe paczki.
+- Prowadzenie globalnych stanów magazynowych.
+- Wystawianie dokumentów PZ.
+- Realizację zamówień i wysyłkę paczek.
 
 ### Serwis Realizacji Zamówień (Outbound)
 
 **Usługa odpowiada za:**
-
-- Przyjmowanie nowych zamówień do realizacji (np. ze sklepu internetowego).
-- Tworzenie listy dla magazyniera: co i z jakiej półki ma przynieść (kompletacja).
-- Obsługę stanowiska pakowania i oznaczanie zamówienia jako gotowe w kartonie.
+- Przyjmowanie zamówień i danych odbiorcy.
+- Zlecanie rezerwacji towaru w Inventory.
+- Tworzenie list kompletacyjnych i potwierdzanie spakowania.
 
 **Usługa nie odpowiada za:**
-
-- Pilnowanie globalnej bazy magazynowej (tylko odpytuje Serwis Stanów, czy dany produkt jest dostępny).
-- Zamawianie podjazdu kuriera i drukowanie etykiet adresowych.
-- Rejestrowanie nowych dostaw od hurtowni.
+- Samodzielne zmienianie stanów magazynowych.
+- Rejestrowanie dostaw od dostawców.
+- Obsługę przekazania paczek kurierowi.
 
 ### Serwis Wysyłki i Kurierów (Shipping)
 
 **Usługa odpowiada za:**
-
-- Generowanie etykiet kurierskich (np. InPost, DPD, DHL).
-- Nadawanie numerów do śledzenia przesyłki (tracking).
-- Rejestrowanie momentu, w którym gotowa paczka została fizycznie wydana kierowcy.
+- Rejestrowanie przesyłek dla spakowanych zamówień.
+- Zapisywanie przewoźnika i wagi paczki.
+- Potwierdzanie przekazania paczki kurierowi i powiadamianie pozostałych usług.
 
 **Usługa nie odpowiada za:**
+- Kompletowanie i pakowanie zamówień.
+- Zarządzanie stanami magazynowymi.
+- Generowanie etykiet i obsługę numerów śledzenia.
 
-- Chodzenie po magazynie i pakowanie towaru do kartonu.
-- Sprawdzanie, czy na półkach jest wystarczająca liczba produktów.
-- Odbieranie palet z dostawami od dostawców.
+## 9. Modele danych
+
+Każdy mikroserwis ma jedną tabelę we własnej bazie danych. Identyfikatory UUID nadaje serwer. Pola oznaczone `↳` są elementami JSON, a nie osobnymi kolumnami.
+
+### Inventory — tabela `Stock`
+
+Jeden rekord opisuje stan produktu w konkretnej lokalizacji.
+
+| Pole | Opis |
+|---|---|
+| `id` | Identyfikator rekordu |
+| `sku` | Kod produktu |
+| `location` | Lokalizacja produktu |
+| `quantity` | Liczba sztuk, razem z zarezerwowanymi |
+| `reservations` | Lista aktywnych rezerwacji — JSON |
+| ↳ `order_id` | Identyfikator zamówienia |
+| ↳ `quantity` | Liczba zarezerwowanych sztuk |
+
+Lista rezerwacji może być pusta. Dostępny stan to `quantity` pomniejszone o sumę rezerwacji.
+
+### Inbound — tabela `Receipt`
+
+Jeden rekord opisuje dostawę wraz z produktami.
+
+| Pole | Opis |
+|---|---|
+| `id` | Identyfikator przyjęcia |
+| `supplier` | Nazwa dostawcy |
+| `status` | Etap obsługi dostawy |
+| `items` | Lista produktów w dostawie — JSON |
+| ↳ `sku` | Kod produktu |
+| ↳ `quantity_received` | Otrzymana liczba sztuk |
+| ↳ `target_location` | Lokalizacja docelowa |
+
+Statusy:
+- `NEW` — nowe przyjęcie
+- `ACCEPTED` — przyjęcie zatwierdzone
+- `POSTED` — towar dodany do Inventory
+- `CANCELLED` — przyjęcie anulowane
+
+### Outbound — tabela `Order`
+
+Jeden rekord opisuje zamówienie wraz z odbiorcą i produktami.
+
+| Pole | Opis |
+|---|---|
+| `id` | Identyfikator zamówienia |
+| `recipient_name` | Imię i nazwisko lub nazwa odbiorcy |
+| `recipient_phone` | Numer telefonu odbiorcy |
+| `recipient_address` | Adres dostawy |
+| `status` | Etap realizacji zamówienia |
+| `items` | Lista zamówionych produktów — JSON |
+| ↳ `sku` | Kod produktu |
+| ↳ `quantity` | Zamówiona liczba sztuk |
+
+Statusy:
+- `NEW` — nowe zamówienie
+- `RESERVED` — towar zarezerwowany
+- `PACKED` — zamówienie spakowane
+- `SHIPPED` — paczka przekazana kurierowi
+- `CANCELLED` — zamówienie anulowane
+
+### Shipping — tabela `Shipment`
+
+Jeden rekord opisuje jedną paczkę.
+
+| Pole | Opis |
+|---|---|
+| `id` | Identyfikator przesyłki |
+| `order_id` | Identyfikator zamówienia |
+| `carrier` | Firma kurierska |
+| `weight_kg` | Waga paczki w kilogramach |
+| `status` | Etap wysyłki |
+| `handed_over_at` | Data i godzina wydania kurierowi |
+
+Statusy:
+- `NEW` — przesyłka zarejestrowana
+- `READY` — gotowa do wydania
+- `HANDED_OVER` — przekazana kurierowi
+- `CANCELLED` — przesyłka anulowana
