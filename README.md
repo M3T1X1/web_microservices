@@ -4,7 +4,39 @@ To szablon do uzupełnienia. Zastąp wskazówki własnymi decyzjami i wynikami. 
 
 ## Uruchomienie i testy
 
-Wymagania: Python 3.12 lub nowszy, PowerShell. Otwórz terminal w katalogu z tym README i `requirements.txt`.
+Wymagania: Python 3.12 lub nowszy i internet do pobrania zależności. Skopiuj projekt na nowy komputer bez katalogu `.venv`. Otwórz terminal w katalogu z tym README.
+
+### Windows 11
+
+Zainstaluj Python 3.12 lub nowszy z [python.org](https://www.python.org/downloads/windows/), wraz z pip i launcherem `py`, i otwórz nowy PowerShell.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+```
+
+`Bypass` dotyczy tylko uruchamianego procesu i nie zmienia trwale polityki PowerShell.
+
+### Debian 13
+
+```bash
+sudo apt update
+sudo apt install python3 python3-venv
+bash scripts/setup.sh
+```
+
+Skrypty tworzą lokalne `.venv`, instalują `requirements.txt` i uruchamiają aplikację bez `--reload`. Ponowne uruchomienie korzysta z istniejącego środowiska. Nie trzeba go aktywować. Przeniesione lub uszkodzone `.venv` należy usunąć i odtworzyć skryptem.
+
+| Opcja | Windows | Debian |
+|---|---|---|
+| Samo przygotowanie środowiska | `-SetupOnly` | `--setup-only` |
+| Testy przed uruchomieniem | `-Test` | `--test` |
+| Inny port | `-Port 8200` | `--port 8200` |
+
+Opcje można łączyć, np. `bash scripts/setup.sh --setup-only --test`. Na Windows dopisz je po ścieżce do skryptu, np. `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -SetupOnly -Test`. Błąd instalacji lub testów przerywa uruchamianie.
+
+Domyślnie API działa pod `http://127.0.0.1:8101`, status pod `/health`, a dokumentacja pod `/docs`. Serwer jest dostępny lokalnie; zatrzymanie: `Ctrl+C`.
+
+### Uruchomienie ręczne (Windows)
 
 ```powershell
 python -m venv .venv
