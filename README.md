@@ -19,8 +19,10 @@ W drugim terminalu: `Invoke-RestMethod http://localhost:8101/health`. Dokumentac
 
 - `app/main.py` — tworzenie aplikacji, magazynów i rejestracja routerów.
 - `app/models/order.py` — modele zamówień i walidacja danych.
+- `app/models/stock.py` — model stanu i walidacja rezerwacji.
 - `app/routers/` — endpointy: `health.py`, `stocks.py`, `orders.py`.
 - `app/services/orders.py` — operacje na zamówieniach i reguła pakowania.
+- `app/services/stocks.py` — odczyt stanów i kontrola dostępności przy rezerwacji.
 - `tests/conftest.py` — wspólny klient ze świeżą aplikacją dla każdego testu.
 - `tests/test_*.py` — scenariusze health, Inventory i Outbound.
 
@@ -96,7 +98,7 @@ Przykłady (`{id}` oznacza UUID):
 
 ## 4. Testy i stan danych
 
-Trzy testy w `tests/test_inventory.py`: zapis → odczyt, błędne dane i konflikt. Każdy używa nowego `create_app()` i sprawdza status, JSON oraz ponowny odczyt. Początkowo jest produkt `SKU-001`, lokalizacja `A-01`, ilość 10, bez rezerwacji.
+Testy Inventory i Outbound sprawdzają zapis i odczyt oraz odrzucanie operacji bez zmiany danych: `404` dla brakującego zasobu, `409` dla braku dostępności lub pakowania bez rezerwacji, `422` dla błędnych UUID i ilości. Każdy test używa nowego `create_app()`. Początkowo jest produkt `SKU-001`, lokalizacja `A-01`, ilość 10, bez rezerwacji. Zamówienia są początkowo puste; integracja potwierdzająca rezerwację z Inventory pozostaje do implementacji.
 
 `S` — UUID tego stanu; `O1` — `22222222-2222-4222-8222-222222222222`, `O2` — `33333333-3333-4333-8333-333333333333`. W żądaniach podstawiamy te UUID.
 
@@ -111,7 +113,7 @@ Trzy testy w `tests/test_inventory.py`: zapis → odczyt, błędne dane i konfli
 | Reguła biznesowa | Stan początkowy; POST rezerwacji O1 na 7, następnie O2 na 4 | `201`, potem `409`; ilość 10, zarezerwowane 7 | Zgodny | `create_app()` |
 | Restart | Rezerwacja 3 i odczyt przez HTTP; restart Uvicorna; odczyt listy i starego S | Przed restartem rezerwacja 3; po restarcie produkt z nowym UUID, ilość 10, brak rezerwacji; stary S daje `404` | Zgodny | Restart procesu |
 
-Wynik `.\.venv\Scripts\python.exe -m pytest -q`: **4 passed** (3 testy domenowe i health).
+Wynik `.\.venv\Scripts\python.exe -m pytest -q`: **22 passed** (Inventory, Outbound i health).
 
 Eksperyment HTTP wykonano bez `--reload` i zmian kodu. Rezerwacja przetrwała kolejne żądania, ale zniknęła po restarcie: dane są w pamięci procesu, a `create_app()` odtwarza produkt początkowy.
 

@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 
+from app.models.stock import Stock
 from app.routers import health, orders, stocks
 from app.services.orders import OrderService
+from app.services.stocks import StockService
 
 
 def create_app() -> FastAPI:
@@ -13,6 +15,9 @@ def create_app() -> FastAPI:
     # Każda instancja aplikacji ma własny magazyn w pamięci.
     # Zastąp "items" nazwą wynikającą z twojej domeny.
     app.state.items = {}
+    stock = Stock(sku="SKU-001", location="A-01", quantity=10)
+    app.state.items[stock.id] = stock
+    app.state.stock_service = StockService(app.state.items)
     app.state.orders = {}
     app.state.order_service = OrderService(app.state.orders)
 

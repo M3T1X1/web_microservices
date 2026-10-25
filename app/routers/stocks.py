@@ -1,19 +1,34 @@
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
+
+from app.models.stock import Reservation, Stock
+from app.services.stocks import StockService
 
 
 router = APIRouter(prefix="/stocks")
 
 
-@router.get("")
-def list_stocks(request: Request) -> list[dict[str, object]]:
-    return list(request.app.state.items.values())
+def get_stock_service(request: Request) -> StockService:
+    return request.app.state.stock_service
 
 
-@router.get("/{stock_id}")
-def get_stock(stock_id: UUID, request: Request) -> dict[str, object]:
-    stock = request.app.state.items.get(stock_id)
-    if stock is None:
-        raise HTTPException(status_code=404, detail="Stock not found")
-    return stock
+StockServiceDep = Annotated[StockService, Depends(get_stock_service)]
+
+
+@router.get("", response_model=list[Stock])
+def list_stocks(service: StockServiceDep) -> list[Stock]:
+    return service.list()
+
+
+@router.get("/{stock_id}", response_model=Stock)
+def get_stock(stock_id: UUID, service: StockServiceDep) -> Stock:
+    return service.get(stock_id)
+
+
+@router.post("/{stock_id}/reservations", response_model=Reservation, status_code=201)
+def create_reservation(
+    stock_id: UUID, body: Reservation, service: StockServiceDep
+) -> Reservation:
+    return service.reserve(stock_id, body)
