@@ -17,52 +17,74 @@ W drugim terminalu: `Invoke-RestMethod http://localhost:8101/health`. Dokumentac
 
 ## 1. Problem i granice
 
-Opisz problem, użytkownika oraz zakres odpowiedzialności usługi. Wypisz także to, za co usługa nie odpowiada. Zdefiniuj 3–5 pojęć domenowych.
+Inventory pomaga pracownikowi magazynu kontrolować ilość i dostępność towaru. Odpowiada za stany, lokalizacje i rezerwacje; nie obsługuje dostawców, kompletacji ani wysyłki.
+
+Pojęcia: **SKU** — kod produktu; **lokalizacja** — miejsce składowania; **rezerwacja** — towar przydzielony zamówieniu; **dostępność** — ilość pomniejszona o rezerwacje.
 
 | Planowana usługa | Odpowiedzialność | Własne dane | Operacje | Potrzebne informacje od innej usługi |
 |---|---|---|---|---|
-| Pierwsza — implementowana teraz | ... | ... | ... | ... |
-| Druga — implementowana później | ... | ... | ... | ... |
+| Inventory — pierwsza | Stany i rezerwacje | `Stock` | Odczyt, aktualizacja stanu, rezerwacja | Identyfikator zamówienia z Outbound |
+| Inbound — później | Przyjęcia towaru | `Receipt` | Rejestracja i zatwierdzenie dostawy | Potwierdzenie aktualizacji stanu z Inventory |
+| Outbound — później | Realizacja zamówień | `Order` | Przyjęcie zamówienia, kompletacja, pakowanie | Dostępność i potwierdzenie rezerwacji z Inventory |
+| Shipping — później | Wysyłka paczek | `Shipment` | Rejestracja przesyłki, wydanie kurierowi | Potwierdzenie spakowania z Outbound |
 
-Wyjaśnij granice biznesowe i właściciela zapisu danych. Opisz jedno przyszłe wywołanie HTTP między usługami: nadawca, odbiorca, metoda, ścieżka, żądanie, odpowiedź i zachowanie przy niedostępności odbiorcy. Na LAB1 nie implementujesz tego połączenia.
+Każda usługa zapisuje własne dane: Inventory — stany i rezerwacje, Inbound — przyjęcia, Outbound — zamówienia, Shipping — przesyłki. Zmiany cudzych danych wymagają wywołania API.
+
+Przyszłe HTTP: **Outbound → Inventory**, `POST /stocks/{id}/reservations`, żądanie `{"order_id":"22222222-2222-4222-8222-222222222222","quantity":3}`, odpowiedź `201` z utworzoną rezerwacją. Przy niedostępności Inventory zamówienie pozostaje `PENDING`, bez potwierdzenia rezerwacji. Połączenie nie jest implementowane na LAB1.
 
 ## 2. Model i reguła biznesowa
 
-Opisz pola, typy, wymagane wartości, statusy i sposób nadawania identyfikatorów. Zapisz jedną regułę wykraczającą poza typy, wymagane pola i unikalność identyfikatora. Podaj operację dozwoloną, niedozwoloną oraz kod błędu. Wszystkie warunki odrzucenia sprawdzaj przed zmianą stanu.
+`Stock`: `id` — UUID nadawany przez serwer; `sku` i `location` — wymagane, niepuste teksty; `quantity` — wymagana liczba całkowita ≥ 0; `reservations` — lista, początkowo pusta. Każda rezerwacja ma wymagane `order_id` (UUID) i `quantity` (liczba całkowita > 0).
+
+**Reguła:** suma rezerwacji nie może przekraczać stanu. Przy 10 sztukach i 7 zarezerwowanych można zarezerwować kolejne 3, ale nie 4 (`409 Conflict`). Wszystkie warunki odrzucenia sprawdzamy przed zmianą danych.
 
 ## 3. Kontrakt API
 
-Minimum: **trzy endpointy domenowe i osobny `/health`**. Zastąp ścieżki własnymi nazwami; wybierz co najmniej jedną operację zapisu.
+Kontrakt API:
 
 | Metoda | Ścieżka | Znaczenie | Sukces | Błędy |
 |---|---|---|---|---|
-| GET | `/health` | Status i nazwa usługi | 200 | ... |
-| GET | `/...` | Lista | 200 | ... |
-| GET | `/.../{id}` | Szczegóły | 200 | 404 |
-| POST albo PATCH | `/...` albo `/.../{id}` | Utworzenie albo modyfikacja | 201 albo 200 | ... |
+| GET | `/health` | Status i nazwa usługi | 200 | — |
+| GET | `/stocks` | Lista stanów | 200 | — |
+| GET | `/stocks/{id}` | Szczegóły stanu | 200 | 404, 422 |
+| POST | `/stocks/{id}/reservations` | Rezerwacja towaru | 201 | 404, 409, 422 |
 
-Dołącz przykładowe żądania i odpowiedzi JSON, także błędy `404`, `409` i `422`. Opisz format `detail`; standardowe błędy walidacji FastAPI mają inną treść niż `HTTPException`. Wyjaśnij dobór kodów i regułę biznesową. Przy samym `PATCH` podaj dane początkowe.
+Przykłady (`{id}` oznacza UUID):
+
+- `GET /health` → `200`, `{"status":"ok","service":"replace-me"}`.
+- `GET /stocks` przy pustym magazynie → `200`, `[]`.
+- `GET /stocks/{id}` dla istniejącego stanu → `200`, `{"id":"11111111-1111-4111-8111-111111111111","sku":"SKU-001","location":"A-01","quantity":10,"reservations":[]}`.
+- `POST /stocks/{id}/reservations`, JSON `{"order_id":"22222222-2222-4222-8222-222222222222","quantity":3}` → `201` z takim samym JSON-em utworzonej rezerwacji.
+- Odczyt nieistniejącego UUID → `404`, `{"detail":"Stock not found"}`.
+- Rezerwacja 11 z 10 dostępnych sztuk → `409`, `{"detail":"Insufficient available stock"}`.
+- Rezerwacja z `quantity: 0` → `422`, np.:
+
+```json
+{"detail":[{"type":"greater_than","loc":["body","quantity"],"msg":"Input should be greater than 0","input":0,"ctx":{"gt":0}}]}
+```
+
+`200` oznacza odczyt, `201` utworzenie rezerwacji, `404` brak zasobu, `409` konflikt z dostępnością, `422` błędne dane. Reguła: rezerwacja nie przekracza dostępnego stanu; odrzucenie nie zmienia danych. `detail` w `HTTPException` jest tutaj tekstem, a przy walidacji FastAPI — listą błędów.
 
 ## 4. Testy i stan danych
 
-Napisz minimum **trzy własne testy automatyczne**: zapis → odczyt, błędne dane bez zmiany stanu, konflikt bez zmiany stanu. Co najmniej jeden sprawdza regułę biznesową; jeśli żaden jej nie obejmuje, dodaj następny. Dostarczony test `/health` nie wlicza się do trzech.
+Trzy testy w `tests/test_inventory.py`: zapis → odczyt, błędne dane i konflikt. Każdy używa nowego `create_app()` i sprawdza status, JSON oraz ponowny odczyt. Początkowo jest produkt `SKU-001`, lokalizacja `A-01`, ilość 10, bez rezerwacji.
 
-Każdy test ma własną aplikację z `create_app()` i znany stan początkowy. Sprawdzaj kod odpowiedzi, istotne pola JSON i wynik ponownego odczytu. Do wspólnych fixture dla wielu plików możesz użyć `tests/conftest.py`.
+`S` — UUID tego stanu; `O1` — `22222222-2222-4222-8222-222222222222`, `O2` — `33333333-3333-4333-8333-333333333333`. W żądaniach podstawiamy te UUID.
 
 | Scenariusz | Stan początkowy i dokładne żądanie | Oczekiwany status, treść i stan | Wynik rzeczywisty | Reset danych |
 |---|---|---|---|---|
-| Health | ... | ... | ... | ... |
-| Lista i szczegóły | ... | ... | ... | ... |
-| Zapis → odczyt | ... | ... | ... | ... |
-| Brak zasobu | ... | ... | ... | ... |
-| Błędne dane | ... | ... | ... | ... |
-| Konflikt | ... | ... | ... | ... |
-| Reguła biznesowa: dozwolona i niedozwolona operacja | ... | ... | ... | ... |
-| Restart | ... | ... | ... | ... |
+| Health | `GET /health` | `200`, `{"status":"ok","service":"replace-me"}` | Zgodny | `create_app()` |
+| Lista i szczegóły | Stan początkowy; `GET /stocks`, `GET /stocks/S` | `200`, jeden produkt i jego szczegóły, ilość 10 | Zgodny | `create_app()` |
+| Zapis → odczyt | Stan początkowy; `POST /stocks/S/reservations`, `{"order_id":"O1","quantity":3}`, potem `GET /stocks/S` | `201`, JSON rezerwacji; odczyt `200`, rezerwacja 3, ilość 10 | Zgodny | `create_app()` |
+| Brak zasobu | `GET /stocks/99999999-9999-4999-8999-999999999999` | `404`, `{"detail":"Stock not found"}` | Zgodny | `create_app()` |
+| Błędne dane | Stan początkowy; POST jak wyżej, `{"order_id":"O1","quantity":0}`, potem odczyt | `422`, błąd pola `quantity`; stan bez zmian | Zgodny | `create_app()` |
+| Konflikt | Zarezerwowane 7; POST jak wyżej, `{"order_id":"O2","quantity":4}`, potem odczyt | `409`, `Insufficient available stock`; nadal tylko rezerwacja 7 | Zgodny | `create_app()` |
+| Reguła biznesowa | Stan początkowy; POST rezerwacji O1 na 7, następnie O2 na 4 | `201`, potem `409`; ilość 10, zarezerwowane 7 | Zgodny | `create_app()` |
+| Restart | Rezerwacja 3 i odczyt przez HTTP; restart Uvicorna; odczyt listy i starego S | Przed restartem rezerwacja 3; po restarcie produkt z nowym UUID, ilość 10, brak rezerwacji; stary S daje `404` | Zgodny | Restart procesu |
 
-Scenariusze mogą współdzielić test, jeśli sprawdza wszystkie wskazane wymagania. Podaj wynik testów uruchomionych poleceniem ze wstępu.
+Wynik `.\.venv\Scripts\python.exe -m pytest -q`: **4 passed** (3 testy domenowe i health).
 
-Osobno uruchom Uvicorna, wykonaj zapis i odczyt przez HTTP, zatrzymaj go i uruchom ponownie. Zapisz rezultat. Wyjaśnij, dlaczego dane przetrwały między żądaniami, ale nie restart procesu. Nie zmieniaj kodu podczas eksperymentu (`--reload` restartuje aplikację).
+Eksperyment HTTP wykonano bez `--reload` i zmian kodu. Rezerwacja przetrwała kolejne żądania, ale zniknęła po restarcie: dane są w pamięci procesu, a `create_app()` odtwarza produkt początkowy.
 
 ## 5. Porównanie architektur
 
