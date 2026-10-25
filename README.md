@@ -15,6 +15,15 @@ python -m venv .venv
 
 W drugim terminalu: `Invoke-RestMethod http://localhost:8101/health`. Dokumentacja: [Swagger UI](http://localhost:8101/docs). Zatrzymanie serwera: `Ctrl+C`. Nie trzeba aktywować środowiska. Zmień `replace-me` w aplikacji i teście na nazwę usługi.
 
+## Struktura kodu
+
+- `app/main.py` — tworzenie aplikacji, magazynów i rejestracja routerów.
+- `app/models/order.py` — modele zamówień i walidacja danych.
+- `app/routers/` — endpointy: `health.py`, `stocks.py`, `orders.py`.
+- `app/services/orders.py` — operacje na zamówieniach i reguła pakowania.
+- `tests/conftest.py` — wspólny klient ze świeżą aplikacją dla każdego testu.
+- `tests/test_*.py` — scenariusze health, Inventory i Outbound.
+
 ## 1. Problem i granice
 
 Inventory pomaga pracownikowi magazynu kontrolować ilość i dostępność towaru. Odpowiada za stany, lokalizacje i rezerwacje; nie obsługuje dostawców, kompletacji ani wysyłki.

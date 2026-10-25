@@ -1,16 +1,4 @@
-import pytest
-from fastapi.testclient import TestClient
-
-from app.main import create_app
-
-
 ORDER_ID = "22222222-2222-4222-8222-222222222222"
-
-
-@pytest.fixture
-def client():
-    with TestClient(create_app()) as client:
-        yield client
 
 
 def test_write_and_read(client):
