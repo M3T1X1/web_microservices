@@ -1,5 +1,10 @@
 from fastapi import FastAPI
 
+from app.models.stock import Stock
+from app.routers import health, orders, stocks
+from app.services.orders import OrderService
+from app.services.stocks import StockService
+
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -10,13 +15,18 @@ def create_app() -> FastAPI:
     # Każda instancja aplikacji ma własny magazyn w pamięci.
     # Zastąp "items" nazwą wynikającą z twojej domeny.
     app.state.items = {}
-
-    @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok", "service": "replace-me"}
+    stock = Stock(sku="SKU-001", location="A-01", quantity=10)
+    app.state.items[stock.id] = stock
+    app.state.stock_service = StockService(app.state.items)
+    app.state.orders = {}
+    app.state.order_service = OrderService(app.state.orders)
 
     # TODO: dodaj tutaj modele/endpointy własnej domeny lub dołącz routery.
     # Magazyn twórz tylko raz na aplikację; endpointy korzystają z app.state.
+    app.include_router(health.router)
+    app.include_router(stocks.router)
+    app.include_router(orders.router)
+
     return app
 
 
