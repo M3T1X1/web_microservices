@@ -88,30 +88,34 @@ Eksperyment HTTP wykonano bez `--reload` i zmian kodu. Rezerwacja przetrwała ko
 
 ## 5. Porównanie architektur
 
-Narysuj małe schematy tego samego systemu: monolit, modularny monolit i mikrousługi. Zaznacz procesy, granice, dane i sposób komunikacji. Wyjaśnij:
+```text
+Monolit:
+[1 proces: Inventory + Inbound + Outbound + Shipping] -> [wspólna baza]
 
-1. Dlaczego twoja usługa może być mikrousługą i czym różni się od klasy/modułu?
-2. Jak wyglądałby system jako monolit?
-3. Co zmieni podział na usługi, w tym koszty sieci i wpływ awarii zależności?
-4. Którą architekturę wybrałbyś dla obecnej skali problemu i dlaczego?
+Modularny monolit (strzałki wewnątrz = wywołania funkcji):
+[1 proces: Inbound -> Inventory <- Outbound <- Shipping] -> [baza: tabele modułów]
+
+Mikrousługi (każdy nawias = osobny proces i własna baza):
+[Inbound/Receipt] --HTTP--> [Inventory/Stock] <--HTTP-- [Outbound/Order] <--HTTP-- [Shipping/Shipment]
+```
+
+1. Inventory ma własne dane i API oraz może działać w osobnym procesie; moduł jest częścią aplikacji.
+2. W monolicie wszystkie cztery funkcje działałyby w jednym procesie ze wspólną bazą.
+3. Podział daje niezależne wdrażanie, ale dodaje opóźnienia sieci i awarie zależności; brak Inventory blokuje rezerwacje.
+4. Modularny monolit — prostsze wdrażanie i utrzymanie przy małej skali.
 
 ## 6. Dokumentacja wykorzystana podczas pracy
 
-Wykorzystaj co najmniej dwa konkretne fragmenty oficjalnej dokumentacji. Przykładowe punkty startowe: [modele żądań](https://fastapi.tiangolo.com/tutorial/body/), [błędy](https://fastapi.tiangolo.com/tutorial/handling-errors/), [testowanie](https://fastapi.tiangolo.com/tutorial/testing/).
-
 | Odnośnik do fragmentu | Rozwiązywany problem | Co zastosowano w kodzie | Jak sprawdzono działanie |
 |---|---|---|---|
-| ... | ... | ... | ... |
-| ... | ... | ... | ... |
+| [FastAPI — Path operation](https://fastapi.tiangolo.com/tutorial/first-steps/#step-3-create-a-path-operation) | Obsługa żądania GET | `@app.get("/health")` | Test sprawdza `200` i JSON |
+| [FastAPI — TestClient](https://fastapi.tiangolo.com/tutorial/testing/#using-testclient) | Testowanie API | `TestClient(create_app())` | `pytest tests/test_health.py`: **1 passed** |
 
 ## 7. Ograniczenia, autorzy i AI
 
-Opisz dane w pamięci, ich reset przy restarcie i brak wspólnego stanu między instancjami. Wskaż inne ograniczenia własnej implementacji.
+Dane są w pamięci, znikają po restarcie i nie są współdzielone między instancjami. Brakuje trwałej bazy, endpointów domenowych i integracji usług.
 
-- Autorzy i wkład każdej osoby: ...
-- AI: narzędzie, zakres pomocy i sposób weryfikacji albo „nie korzystano”.
-
-Przed oddaniem sprawdź instalację w nowym środowisku oraz kompletność README. Nie dołączaj `.venv`, cache Pythona ani sekretów. Każda osoba w parze samodzielnie wyjaśnia kod i wykonuje małą zmianę podczas odbioru. LAB1 to pierwsza usługa; wymaganie co najmniej dwóch różnych usług na osobę dotyczy całego projektu semestralnego.
+- AI: ChatGPT pomógł w testach i endpointach; weryfikacja przez przegląd kodu i test `/health`.
 
 ## 8. Podział systemu na usługi
 
