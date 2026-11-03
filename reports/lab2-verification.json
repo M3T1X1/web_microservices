@@ -1,0 +1,138 @@
+{
+  "verified_at_utc": "2026-11-03T11:04:52.047334+00:00",
+  "python": "3.13.5",
+  "checks": [
+    {
+      "name": "health and real Redis PING",
+      "result": "PASS",
+      "health": {
+        "status": "ok",
+        "service": "replace-me"
+      },
+      "redis": "PONG"
+    },
+    {
+      "name": "MISS -> HIT with TTL",
+      "result": "PASS",
+      "request": "GET /stocks/6bd9bcd9-4d56-463a-bb41-03ca06f9aaa0",
+      "x_cache": [
+        "MISS",
+        "HIT"
+      ],
+      "ttl": 2
+    },
+    {
+      "name": "real TTL expiration -> MISS",
+      "result": "PASS",
+      "expired_ttl": -2
+    },
+    {
+      "name": "reservation and PATCH invalidate cache after commit",
+      "result": "PASS",
+      "stock": {
+        "id": "6bd9bcd9-4d56-463a-bb41-03ca06f9aaa0",
+        "sku": "SKU-001",
+        "location": "A-01",
+        "quantity": 14,
+        "reservations": [
+          {
+            "order_id": "22222222-2222-4222-8222-222222222222",
+            "quantity": 3
+          }
+        ]
+      }
+    },
+    {
+      "name": "business conflict preserves state",
+      "result": "PASS",
+      "status": 409,
+      "body": {
+        "detail": "Insufficient available stock"
+      }
+    },
+    {
+      "name": "Outbound write, cache and packing rule",
+      "result": "PASS",
+      "order": {
+        "recipient_name": "Test LAB2",
+        "recipient_phone": "123456789",
+        "recipient_address": "Magazyn testowy",
+        "items": [
+          {
+            "sku": "SKU-001",
+            "quantity": 3
+          }
+        ],
+        "id": "a6a93936-abc6-44e4-bc2a-200bf58d545d",
+        "status": "NEW"
+      },
+      "packing_status": 409
+    },
+    {
+      "name": "Uvicorn process restart, both domains, empty cache",
+      "result": "PASS",
+      "x_cache": "MISS",
+      "state": "unchanged"
+    },
+    {
+      "name": "Redis stopped: reads and writes still work",
+      "result": "PASS",
+      "x_cache": "BYPASS",
+      "quantity": 18,
+      "readiness": "degraded"
+    },
+    {
+      "name": "Redis restarted",
+      "result": "PASS",
+      "x_cache": [
+        "MISS",
+        "HIT"
+      ],
+      "quantity": 18
+    },
+    {
+      "name": "failed invalidation: stale HIT until TTL, then current MISS",
+      "result": "PASS",
+      "old_quantity": 20,
+      "database_quantity": 25,
+      "x_cache": [
+        "BYPASS",
+        "HIT",
+        "MISS"
+      ]
+    }
+  ],
+  "source": {
+    "url": "https://pawoom.lazysolutions.pl/2026_2027/lab2/lab2-support.zip",
+    "zip_sha256": "575fbe27f7bafb582311c35ccc7eb4478921c72c798a72117ce2df4b0361e902",
+    "unchanged_files": {
+      "database.py": "54a410ca6f21325fa31dd34c39ef6be54fb280f38b734298444d1f1a99f3a48a",
+      "cache.py": "f73b1c2ea041b46944b5de5350032b897a93732acbd4f153fb10eff19e6fecd9"
+    }
+  },
+  "lab1_baseline": {
+    "result": "PASS",
+    "before_restart": {
+      "id": "b2ddba91-a3bf-47ac-bc5a-c192558dbba5",
+      "sku": "SKU-001",
+      "location": "A-01",
+      "quantity": 10,
+      "reservations": [
+        {
+          "order_id": "22222222-2222-4222-8222-222222222222",
+          "quantity": 3
+        }
+      ]
+    },
+    "after_restart": {
+      "id": "c09a1b79-f484-4fcc-a75c-22a4db032262",
+      "sku": "SKU-001",
+      "location": "A-01",
+      "quantity": 10,
+      "reservations": []
+    },
+    "old_stock_status": 404,
+    "orders_after_restart": []
+  },
+  "redis_version": "8.0.2"
+}

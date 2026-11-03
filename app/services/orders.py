@@ -1,42 +1,25 @@
-from threading import Lock
 from uuid import UUID
 
-from fastapi import HTTPException
-
+from app.cache import JsonCache
 from app.models.order import Order, OrderCreate
+from app.repositories import OrderRepository
+from app.services.cached_read import cached_read
 
 
 class OrderService:
-    def __init__(self, orders: dict[UUID, Order]) -> None:
-        self._orders = orders
-        self._lock = Lock()
+    def __init__(self, repository: OrderRepository, cache: JsonCache):
+        self.repository, self.cache = repository, cache
 
     def create(self, body: OrderCreate) -> Order:
-        order = Order(**body.model_dump())
-        with self._lock:
-            self._orders[order.id] = order
-            return order.model_copy(deep=True)
+        return self.repository.create(body)
 
     def list(self) -> list[Order]:
-        with self._lock:
-            return [order.model_copy(deep=True) for order in self._orders.values()]
+        return self.repository.list()
 
-    def get(self, order_id: UUID) -> Order:
-        with self._lock:
-            return self._find(order_id).model_copy(deep=True)
+    def get(self, order_id: UUID) -> tuple[Order, str]:
+        return cached_read(order_id, self.repository, self.cache, Order)
 
     def pack(self, order_id: UUID) -> Order:
-        with self._lock:
-            order = self._find(order_id)
-            if order.status != "RESERVED":
-                raise HTTPException(
-                    status_code=409, detail="Order must be reserved before packing"
-                )
-            order.status = "PACKED"
-            return order.model_copy(deep=True)
-
-    def _find(self, order_id: UUID) -> Order:
-        order = self._orders.get(order_id)
-        if order is None:
-            raise HTTPException(status_code=404, detail="Order not found")
-        return order
+        result = self.repository.pack(order_id)
+        self.cache.delete(order_id)
+        return result

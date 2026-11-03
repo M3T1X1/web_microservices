@@ -12,6 +12,10 @@ class Reservation(BaseModel):
     quantity: int = Field(gt=0, strict=True)
 
 
+class StockUpdate(BaseModel):
+    quantity: int = Field(ge=0, strict=True)
+
+
 class Stock(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     sku: NonEmptyText

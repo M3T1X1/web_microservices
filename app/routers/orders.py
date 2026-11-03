@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 
 from app.models.order import Order, OrderCreate
 from app.services.orders import OrderService
@@ -28,8 +28,10 @@ def list_orders(service: OrderServiceDep) -> list[Order]:
 
 
 @router.get("/{order_id}", response_model=Order)
-def get_order(order_id: UUID, service: OrderServiceDep) -> Order:
-    return service.get(order_id)
+def get_order(order_id: UUID, response: Response, service: OrderServiceDep) -> Order:
+    result, source = service.get(order_id)
+    response.headers["X-Cache"] = source
+    return result
 
 
 @router.post("/{order_id}/pack", response_model=Order)
