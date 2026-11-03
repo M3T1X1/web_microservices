@@ -1,9 +1,9 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 
-from app.models.stock import Reservation, Stock
+from app.models.stock import Reservation, Stock, StockUpdate
 from app.services.stocks import StockService
 
 
@@ -23,8 +23,15 @@ def list_stocks(service: StockServiceDep) -> list[Stock]:
 
 
 @router.get("/{stock_id}", response_model=Stock)
-def get_stock(stock_id: UUID, service: StockServiceDep) -> Stock:
-    return service.get(stock_id)
+def get_stock(stock_id: UUID, response: Response, service: StockServiceDep) -> Stock:
+    result, source = service.get(stock_id)
+    response.headers["X-Cache"] = source
+    return result
+
+
+@router.patch("/{stock_id}", response_model=Stock)
+def update_stock(stock_id: UUID, body: StockUpdate, service: StockServiceDep) -> Stock:
+    return service.update(stock_id, body)
 
 
 @router.post("/{stock_id}/reservations", response_model=Reservation, status_code=201)
