@@ -2,6 +2,8 @@ from uuid import UUID
 
 import pytest
 
+from app.db_models import OrderRow
+
 
 @pytest.fixture
 def order_body():
@@ -91,7 +93,8 @@ def test_reserved_order_can_be_packed_only_once(client, order_body):
     assert response.status_code == 201
     order_id = response.json()["id"]
     # Potwierdzenie z Inventory jest symulowane, bo integracja jeszcze nie istnieje.
-    client.app.state.orders[UUID(order_id)].status = "RESERVED"
+    with client.app.state.order_repository.sessions.begin() as db:
+        db.get(OrderRow, UUID(order_id)).status = "RESERVED"
     path = f"/orders/{order_id}"
     before = client.get(path).json()
 

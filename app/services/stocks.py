@@ -1,38 +1,27 @@
-from threading import Lock
 from uuid import UUID
 
-from fastapi import HTTPException
-
-from app.models.stock import Reservation, Stock
+from app.cache import JsonCache
+from app.models.stock import Reservation, Stock, StockUpdate
+from app.repositories import StockRepository
+from app.services.cached_read import cached_read
 
 
 class StockService:
-    def __init__(self, stocks: dict[UUID, Stock]) -> None:
-        self._stocks = stocks
-        self._lock = Lock()
+    def __init__(self, repository: StockRepository, cache: JsonCache):
+        self.repository, self.cache = repository, cache
 
     def list(self) -> list[Stock]:
-        with self._lock:
-            return [stock.model_copy(deep=True) for stock in self._stocks.values()]
+        return self.repository.list()
 
-    def get(self, stock_id: UUID) -> Stock:
-        with self._lock:
-            return self._find(stock_id).model_copy(deep=True)
+    def get(self, stock_id: UUID) -> tuple[Stock, str]:
+        return cached_read(stock_id, self.repository, self.cache, Stock)
 
     def reserve(self, stock_id: UUID, reservation: Reservation) -> Reservation:
-        # Sprawdzenie dostępności i zapis są jedną operacją.
-        with self._lock:
-            stock = self._find(stock_id)
-            reserved = sum(item.quantity for item in stock.reservations)
-            if reservation.quantity > stock.quantity - reserved:
-                raise HTTPException(
-                    status_code=409, detail="Insufficient available stock"
-                )
-            stock.reservations.append(reservation.model_copy(deep=True))
-            return reservation.model_copy(deep=True)
+        result = self.repository.reserve(stock_id, reservation)
+        self.cache.delete(stock_id)  # Wzorzec z ZIP: commit first, potem invalidation.
+        return result
 
-    def _find(self, stock_id: UUID) -> Stock:
-        stock = self._stocks.get(stock_id)
-        if stock is None:
-            raise HTTPException(status_code=404, detail="Stock not found")
-        return stock
+    def update(self, stock_id: UUID, body: StockUpdate) -> Stock:
+        result = self.repository.update(stock_id, body)
+        self.cache.delete(stock_id)
+        return result
