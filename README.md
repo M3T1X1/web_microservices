@@ -1,6 +1,6 @@
-# Własna usługa — LAB1
+# System magazynowy — Inventory i Outbound
 
-To szablon do uzupełnienia. Zastąp wskazówki własnymi decyzjami i wynikami. Obowiązuje zakres z instrukcji `lab1.md` otrzymanej wraz z materiałami. Starter zawiera wyłącznie `/health`, pusty magazyn w pamięci i test startowy.
+Inventory odpowiada za stany, rezerwacje i przyjęcia towaru. **Inbound jest modułem Inventory**, korzysta z tej samej bazy i transakcji. Outbound odpowiada za zamówienia, a Shipping pozostaje planowaną usługą. Inventory i Outbound działają obecnie w jednym procesie FastAPI, z osobnymi bazami SQLite i opcjonalnym cache Redis.
 
 ## Uruchomienie i testy
 
@@ -49,31 +49,34 @@ W drugim terminalu: `Invoke-RestMethod http://localhost:8101/health`. Dokumentac
 
 ## Struktura kodu
 
-- `app/main.py` — tworzenie aplikacji, magazynów i rejestracja routerów.
+- `app/main.py` — inicjalizacja baz, serwisów i rejestracja routerów.
 - `app/models/order.py` — modele zamówień i walidacja danych.
 - `app/models/stock.py` — model stanu i walidacja rezerwacji.
-- `app/routers/` — endpointy: `health.py`, `stocks.py`, `orders.py`.
+- `app/models/receipt.py` — modele przyjęcia i pozycji dostawy.
+- `app/routers/` — endpointy: `health.py`, `stocks.py`, `receipts.py`, `orders.py`.
 - `app/services/orders.py` — operacje na zamówieniach i reguła pakowania.
 - `app/services/stocks.py` — odczyt stanów i kontrola dostępności przy rezerwacji.
+- `app/services/receipts.py` — operacje przyjęć i unieważnianie cache zmienionych stanów po księgowaniu.
+- `app/repositories.py` — transakcje, reguły biznesowe i zapis obu domen; przyjęcia należą do Inventory.
+- `app/db_models.py` — tabele `stocks`, `receipts` i `orders`.
 - `tests/conftest.py` — wspólny klient ze świeżą aplikacją dla każdego testu.
 - `tests/test_*.py` — scenariusze health, Inventory i Outbound.
 
 ## 1. Problem i granice
 
-Inventory pomaga pracownikowi magazynu kontrolować ilość i dostępność towaru. Odpowiada za stany, lokalizacje i rezerwacje; nie obsługuje dostawców, kompletacji ani wysyłki.
+Inventory pomaga pracownikowi magazynu kontrolować ilość i dostępność towaru. Odpowiada za stany, lokalizacje, rezerwacje i przyjęcia dostaw wraz z danymi dostawcy; nie obsługuje kompletacji ani wysyłki.
 
-Pojęcia: **SKU** — kod produktu; **lokalizacja** — miejsce składowania; **rezerwacja** — towar przydzielony zamówieniu; **dostępność** — ilość pomniejszona o rezerwacje.
+Pojęcia: **SKU** — kod produktu; **lokalizacja** — miejsce składowania; **rezerwacja** — towar przydzielony zamówieniu; **dostępność** — ilość pomniejszona o rezerwacje; **przyjęcie** — dostawa księgowana na stan Inventory.
 
 | Planowana usługa | Odpowiedzialność | Własne dane | Operacje | Potrzebne informacje od innej usługi |
 |---|---|---|---|---|
-| Inventory| Stany i rezerwacje | `Stock` | Odczyt, aktualizacja stanu, rezerwacja | Identyfikator zamówienia z Outbound |
-| Inbound| Przyjęcia towaru | `Receipt` | Rejestracja i zatwierdzenie dostawy | Potwierdzenie aktualizacji stanu z Inventory |
+| Inventory (z przyjęciami)| Stany, rezerwacje i dostawy | `Stock`, `Receipt` | Odczyt, korekta, rezerwacja, rejestracja i księgowanie przyjęć | Identyfikator zamówienia z Outbound |
 | Outbound| Realizacja zamówień | `Order` | Przyjęcie zamówienia, kompletacja, pakowanie | Dostępność i potwierdzenie rezerwacji z Inventory |
 | Shipping| Wysyłka paczek | `Shipment` | Rejestracja przesyłki, wydanie kurierowi | Potwierdzenie spakowania z Outbound |
 
-Każda usługa zapisuje własne dane: Inventory — stany i rezerwacje, Inbound — przyjęcia, Outbound — zamówienia, Shipping — przesyłki. Zmiany cudzych danych wymagają wywołania API.
+Każda usługa zapisuje własne dane: Inventory — stany, rezerwacje i przyjęcia, Outbound — zamówienia, Shipping — przesyłki. Księgowanie przyjęcia zmienia stany wewnętrznie, w tej samej transakcji Inventory; zmiany danych innej usługi wymagają API.
 
-Przyszłe HTTP: **Outbound → Inventory**, `POST /stocks/{id}/reservations`, żądanie `{"order_id":"22222222-2222-4222-8222-222222222222","quantity":3}`, odpowiedź `201` z utworzoną rezerwacją. Przy niedostępności Inventory zamówienie pozostaje `PENDING`, bez potwierdzenia rezerwacji. Połączenie nie jest implementowane na LAB1.
+Przyszłe HTTP: **Outbound → Inventory**, `POST /stocks/{id}/reservations`, żądanie `{"order_id":"22222222-2222-4222-8222-222222222222","quantity":3}`, odpowiedź `201` z utworzoną rezerwacją. Przy niedostępności Inventory zamówienie pozostaje `NEW`, bez potwierdzenia rezerwacji. Integracja HTTP nie jest jeszcze zaimplementowana.
 
 ## 2. Model i reguła biznesowa
 
@@ -83,13 +86,15 @@ Przyszłe HTTP: **Outbound → Inventory**, `POST /stocks/{id}/reservations`, ż
 
 **Reguła:** suma rezerwacji nie może przekraczać stanu. Przy 10 sztukach i 7 zarezerwowanych można zarezerwować kolejne 3, ale nie 4 (`409 Conflict`). Wszystkie warunki odrzucenia sprawdzamy przed zmianą danych.
 
-### Inbound — `Receipt` (planowana usługa)
+Para `(sku, location)` jest unikalna w bazie Inventory.
+
+### Inventory — `Receipt` (moduł przyjęć)
 
 `Receipt`: `id` — UUID serwera; `supplier` — niepusty tekst; `status` — początkowo `NEW`; `items` — niepusta lista pozycji: `sku`, `target_location` (niepuste teksty), `quantity_received` (liczba całkowita > 0).
 
-**Reguła:** tylko przyjęcie `ACCEPTED` można przekazać do Inventory; po potwierdzeniu otrzymuje status `POSTED`. Niedozwolona operacja zwraca `409` bez zmiany danych.
+**Reguła:** `NEW → ACCEPTED → POSTED`. Księgowanie dodaje ilości do stanów według SKU i lokalizacji albo tworzy brakujące stany. Cała dostawa i status `POSTED` są zapisywane w jednej transakcji; istniejące rezerwacje pozostają bez zmian. Powtórne księgowanie daje `409`. Anulowanie do `CANCELLED` jest dozwolone tylko z `NEW` lub `ACCEPTED`.
 
-### Outbound — `Order` (planowana usługa)
+### Outbound — `Order`
 
 `Order`: `id` — UUID serwera; `recipient_name`, `recipient_phone`, `recipient_address` — niepuste teksty; `status` — początkowo `NEW`; `items` — niepusta lista pozycji: `sku` (niepusty tekst), `quantity` (liczba całkowita > 0).
 
@@ -128,7 +133,30 @@ Przykłady (`{id}` oznacza UUID):
 
 `200` oznacza odczyt, `201` utworzenie rezerwacji, `404` brak zasobu, `409` konflikt z dostępnością, `422` błędne dane. Reguła: rezerwacja nie przekracza dostępnego stanu; odrzucenie nie zmienia danych. `detail` w `HTTPException` jest tutaj tekstem, a przy walidacji FastAPI — listą błędów.
 
+### Przyjęcia w Inventory
+
+| Metoda | Ścieżka | Znaczenie | Sukces | Błędy |
+|---|---|---|---|---|
+| POST | `/receipts` | Utworzenie przyjęcia `NEW` | 201 | 422, 503 |
+| GET | `/receipts` | Lista przyjęć | 200 | 503 |
+| GET | `/receipts/{id}` | Szczegóły przyjęcia | 200 | 404, 422, 503 |
+| POST | `/receipts/{id}/accept` | Zatwierdzenie `NEW → ACCEPTED` | 200 | 404, 409, 422, 503 |
+| POST | `/receipts/{id}/post` | Księgowanie `ACCEPTED → POSTED` i aktualizacja stanów | 200 | 404, 409, 422, 503 |
+| POST | `/receipts/{id}/cancel` | Anulowanie `NEW` lub `ACCEPTED` | 200 | 404, 409, 422, 503 |
+
+Przykład `POST /receipts`:
+
+```json
+{"supplier":"Dostawca ABC","items":[{"sku":"SKU-001","quantity_received":5,"target_location":"A-01"}]}
+```
+
+Odpowiedź zawiera te same dane oraz UUID `id` i `status: "NEW"`. Zwrócony UUID podstaw pod `{id}`, następnie wywołaj `/accept` i `/post` (bez treści żądania). Stan 10 wzrośnie do 15 dopiero po `/post`. Powtarzające się SKU i lokalizacja w pozycjach są sumowane. Odczyty przyjęć korzystają bezpośrednio z bazy.
+
+Brak przyjęcia: `404`, `{"detail":"Receipt not found"}`. Księgowanie przed zatwierdzeniem, ponowne księgowanie albo księgowanie po anulowaniu: `409`, `{"detail":"Only ACCEPTED receipts can be posted"}`. Anulowanie zaksięgowanego przyjęcia daje `409`; nie odejmuje towaru od stanu.
+
 ## 4. Testy i stan danych
+
+Poniższa tabela i wynik 22 testów dokumentują LAB1. Aktualny zestaw obejmuje też SQLite, Redis i przyjęcia; jego wynik znajduje się w punkcie 10.
 
 Testy Inventory i Outbound sprawdzają zapis i odczyt oraz odrzucanie operacji bez zmiany danych: `404` dla brakującego zasobu, `409` dla braku dostępności lub pakowania bez rezerwacji, `422` dla błędnych UUID i ilości. Każdy test używa nowego `create_app()`. Początkowo jest produkt `SKU-001`, lokalizacja `A-01`, ilość 10, bez rezerwacji. Zamówienia są początkowo puste; integracja potwierdzająca rezerwację z Inventory pozostaje do implementacji.
 
@@ -153,17 +181,17 @@ Eksperyment HTTP wykonano bez `--reload` i zmian kodu. Rezerwacja przetrwała ko
 
 ```text
 Monolit:
-[1 proces: Inventory + Inbound + Outbound + Shipping] -> [wspólna baza]
+[1 proces: Inventory (stany + przyjęcia) + Outbound + Shipping] -> [wspólna baza]
 
 Modularny monolit (strzałki wewnątrz = wywołania funkcji):
-[1 proces: Inbound -> Inventory <- Outbound <- Shipping] -> [baza: tabele modułów]
+[1 proces: Inventory (stany + przyjęcia) <- Outbound <- Shipping] -> [baza: tabele modułów]
 
 Mikrousługi (każdy nawias = osobny proces i własna baza):
-[Inbound/Receipt] --HTTP--> [Inventory/Stock] <--HTTP-- [Outbound/Order] <--HTTP-- [Shipping/Shipment]
+[Inventory/Stock + Receipt] <--HTTP-- [Outbound/Order] <--HTTP-- [Shipping/Shipment]
 ```
 
 1. Inventory ma własne dane i API oraz może działać w osobnym procesie; moduł jest częścią aplikacji.
-2. W monolicie wszystkie cztery funkcje działałyby w jednym procesie ze wspólną bazą.
+2. W monolicie przyjęcia, stany, zamówienia i wysyłka działałyby w jednym procesie ze wspólną bazą.
 3. Podział daje niezależne wdrażanie, ale dodaje opóźnienia sieci i awarie zależności; brak Inventory blokuje rezerwacje.
 4. Modularny monolit — prostsze wdrażanie i utrzymanie przy małej skali.
 
@@ -176,35 +204,27 @@ Mikrousługi (każdy nawias = osobny proces i własna baza):
 
 ## 7. Ograniczenia, autorzy i AI
 
-Dane są w pamięci, znikają po restarcie i nie są współdzielone między instancjami. Brakuje trwałej bazy, endpointów domenowych i integracji usług.
+Dane są trwałe w SQLite. Przyjęcia należą do Inventory; brakuje jeszcze automatycznej integracji Inventory–Outbound, zwalniania rezerwacji i wysyłki. Redis może zwracać starą kopię do wygaśnięcia TTL.
 
 - AI: ChatGPT pomógł w testach i endpointach; weryfikacja przez przegląd kodu i test `/health`.
 
 ## 8. Podział systemu na usługi
 
-### Serwis Stanów Magazynowych (Inventory)
+### Serwis Magazynu i Przyjęć (Inventory)
 
 **Usługa odpowiada za:**
 - Przechowywanie ilości i lokalizacji produktów.
-- Rezerwowanie towaru dla zamówień i zwalnianie rezerwacji.
-- Aktualizowanie stanów przy przyjęciu, przesunięciu i wydaniu towaru.
+- Rezerwowanie towaru dla zamówień.
+- Rejestrowanie dostaw, dostawcy, otrzymanych ilości i lokalizacji docelowych.
+- Zatwierdzanie, księgowanie i anulowanie przyjęć przed zaksięgowaniem.
+- Aktualizowanie stanów przy księgowaniu dostawy i korekcie ilości.
 
 **Usługa nie odpowiada za:**
-- Rejestrowanie dostaw od dostawców.
 - Kompletowanie i pakowanie zamówień.
 - Obsługę wysyłki paczek.
-
-### Serwis Przyjęć Towaru (Inbound)
-
-**Usługa odpowiada za:**
-- Rejestrowanie dostaw i danych dostawcy.
-- Zapisywanie otrzymanych ilości i lokalizacji docelowych.
-- Zgłaszanie przyjęcia towaru do Inventory.
-
-**Usługa nie odpowiada za:**
-- Prowadzenie globalnych stanów magazynowych.
 - Wystawianie dokumentów PZ.
-- Realizację zamówień i wysyłkę paczek.
+
+Inbound jest modułem tej usługi, bez osobnego procesu, bazy i integracji HTTP z Inventory.
 
 ### Serwis Realizacji Zamówień (Outbound)
 
@@ -232,9 +252,9 @@ Dane są w pamięci, znikają po restarcie i nie są współdzielone między ins
 
 ## 9. Modele danych
 
-Każdy mikroserwis ma jedną tabelę we własnej bazie danych. Identyfikatory UUID nadaje serwer. Pola oznaczone `↳` są elementami JSON, a nie osobnymi kolumnami.
+Inventory ma dwie tabele we własnej bazie: `stocks` i `receipts`. Outbound ma tabelę `orders` w osobnej bazie; Shipping z modelem `Shipment` jest planowany. Identyfikatory UUID nadaje serwer. Pola oznaczone `↳` są elementami JSON, a nie osobnymi kolumnami.
 
-### Inventory — tabela `Stock`
+### Inventory — tabela `stocks` (model `Stock`)
 
 Jeden rekord opisuje stan produktu w konkretnej lokalizacji.
 
@@ -250,7 +270,7 @@ Jeden rekord opisuje stan produktu w konkretnej lokalizacji.
 
 Lista rezerwacji może być pusta. Dostępny stan to `quantity` pomniejszone o sumę rezerwacji.
 
-### Inbound — tabela `Receipt`
+### Inventory — tabela `receipts` (model `Receipt`, moduł przyjęć)
 
 Jeden rekord opisuje dostawę wraz z produktami.
 
@@ -267,10 +287,10 @@ Jeden rekord opisuje dostawę wraz z produktami.
 Statusy:
 - `NEW` — nowe przyjęcie
 - `ACCEPTED` — przyjęcie zatwierdzone
-- `POSTED` — towar dodany do Inventory
+- `POSTED` — ilości dodane do stanów w tej samej transakcji Inventory
 - `CANCELLED` — przyjęcie anulowane
 
-### Outbound — tabela `Order`
+### Outbound — tabela `orders` (model `Order`)
 
 Jeden rekord opisuje zamówienie wraz z odbiorcą i produktami.
 
@@ -314,7 +334,7 @@ Statusy:
 
 ## 10. LAB2 — baza danych i cache
 
-Poniższe sekcje uzupełniają opis LAB1. Sekcje 1–9 zachowano w oryginalnej postaci i opisują poprzedni etap: utrata danych po restarcie oraz wynik 22 testów dotyczą LAB1. Aktualne zachowanie, konfiguracja i wyniki LAB2 znajdują się poniżej.
+Poniższe sekcje opisują SQLite i Redis z LAB2 oraz przyjęcia włączone do Inventory. Historyczna tabela restartu i wynik 22 testów w punkcie 4 dotyczą LAB1; aktualne dane są trwałe, a wynik testów podano poniżej.
 
 ### Zmiany i wykorzystany kod pomocniczy
 
@@ -343,12 +363,17 @@ Zachowano fabrykę `create_app()`, dotychczasowe metody i ścieżki HTTP, format
 
 | Baza i właściciel zapisu | Tabela | Pola i ograniczenia |
 |---|---|---|
-| Inventory — `inventory.db` | `stocks` | `id` UUID PK; wymagane `sku`, `location`; `quantity` całkowite ≥ 0; `reservations` JSON z `order_id` UUID i dodatnią ilością |
+| Inventory — `inventory.db` | `stocks` | `id` UUID PK; unikalna para `(sku, location)`; `quantity` całkowite ≥ 0; `reservations` JSON z `order_id` UUID i dodatnią ilością |
+| Inventory — ta sama baza | `receipts` | `id` UUID PK; wymagany dostawca; dozwolony status; pozycje dostawy w JSON |
 | Outbound — `outbound.db` | `orders` | `id` UUID PK; wymagane dane odbiorcy; `status` ograniczony do statusów LAB1; `items` JSON z SKU i dodatnią ilością |
 
-`StockRow` i `OrderRow` korzystają z `Base` pobranego z ZIP-a. Inicjalizacja przekazuje do `Base.metadata.create_all()` tylko tabelę właściciela danej bazy. Baza Inventory nie zawiera tabeli zamówień, a baza Outbound nie zawiera stanów. Jedna tabela z listą JSON na domenę zachowuje model z sekcji 9. Nowa lista rezerwacji jest przypisywana jako całość, aby ORM wykrył zmianę JSON.
+`StockRow`, `ReceiptRow` i `OrderRow` korzystają z `Base` pobranego z ZIP-a. Inicjalizacja tworzy wyłącznie tabele właściciela danej bazy: `stocks` i `receipts` w Inventory, `orders` w Outbound. Nowa lista rezerwacji jest przypisywana jako całość, aby ORM wykrył zmianę JSON.
 
-Baza chroni klucz główny, `NOT NULL`, nieujemną ilość i dozwolone statusy. Pydantic nadal pilnuje tekstów, UUID i ścisłych typów ilości. Nie dodano nowej reguły unikalności SKU. `order_id` w rezerwacji jest odwołaniem do obcej domeny bez FK między bazami; Inventory nie kopiuje danych odbiorcy ani statusu zamówienia. Outbound nie zapisuje cudzych stanów magazynowych.
+Baza chroni klucz główny, `NOT NULL`, nieujemną ilość, dozwolone statusy oraz unikalną parę SKU–lokalizacja. Pydantic pilnuje tekstów, UUID i ścisłych typów ilości. `order_id` w rezerwacji jest odwołaniem do obcej domeny bez FK między bazami; Inventory nie kopiuje danych odbiorcy ani statusu zamówienia. Outbound nie zapisuje cudzych stanów magazynowych.
+
+`app/main.py` tworzy brakujące tabele przez `Base.metadata.create_all()`. Przy tworzeniu nowej tabeli `stocks` powstaje też indeks `uq_stocks_sku_location`, zadeklarowany w `app/db_models.py`. Nie ma automatycznej migracji istniejących tabel ani dodawania do nich nowych indeksów. Podczas developmentu po zmianie struktury odtwarzamy lokalne bazy od zera; zwykły restart bez usuwania plików zachowuje dane.
+
+Przyjęcie i wszystkie jego pozycje są księgowane w jednej transakcji `BEGIN IMMEDIATE`: istniejące stany są zwiększane, brakujące tworzone, a przyjęcie otrzymuje `POSTED`. Nie zmieniamy rezerwacji. Powtórzone pozycje tej samej pary SKU–lokalizacja są sumowane. Błąd cofa również wcześniejsze zmiany pozycji tej dostawy. Równoczesne próby zaksięgowania tego samego przyjęcia dają jeden sukces i jeden konflikt; nie podwajają dostawy.
 
 Wszystkie listy, szczegóły i operacje zapisu przeniesionych danych korzystają z repozytoriów SQLite; stare słowniki usunięto. Silnik i fabryka sesji powstają raz na aplikację, ale każda operacja otwiera osobną sesję. `with sessions.begin()` z wzorca ZIP zatwierdza **commit** po poprawnym wyjściu, a po wyjątku wykonuje **rollback** i zamyka sesję. Odczyty używają `with sessions()` i również zamykają sesję. `lifespan` przygotowuje zasoby, a `ExitStack` zamyka oba silniki i klienta Redis, także przy błędzie startu. Import modułu nie tworzy plików baz.
 
@@ -358,7 +383,7 @@ Seed dodaje `SKU-001`, `A-01`, ilość 10 i pustą listę rezerwacji tylko do pu
 
 Reguła Inventory: przy 10 sztukach rezerwacja 7 jest dozwolona, a kolejna 4 daje `409`, bez zmiany stanu. Nowa korekta nie może obniżyć `quantity` poniżej sumy rezerwacji: przy rezerwacji 3 można ustawić 3, lecz nie 2. Reguła Outbound: tylko `RESERVED` można zmienić na `PACKED`; `NEW` i ponowne pakowanie `PACKED` są odrzucane bez zmian.
 
-Plan integracji pozostaje **Outbound → Inventory**, `POST /stocks/{id}/reservations`. Po potwierdzeniu rezerwacji Outbound będzie mógł nadać `RESERVED`. W obecnym kodzie stan początkowy to `NEW`; użyte wcześniej w opisie `PENDING` oznaczało planowane oczekiwanie i nie jest zaimplementowanym statusem. Integracji HTTP jeszcze nie dodano. Poprawny stan `RESERVED` w testach jest przygotowywany w bazie jako symulacja przyszłego potwierdzenia. Przed wdrożeniem integracji trzeba zaplanować idempotencję, timeouty i ponowienia. Inbound i Shipping pozostają planowanymi usługami.
+Plan integracji pozostaje **Outbound → Inventory**, `POST /stocks/{id}/reservations`. Po potwierdzeniu rezerwacji Outbound będzie mógł nadać `RESERVED`. Integracji HTTP jeszcze nie dodano; `RESERVED` w testach jest przygotowywany w bazie. Przyjęcia (dawny Inbound) działają już wewnątrz Inventory, bez wywołania HTTP między domenami. Shipping pozostaje planowany.
 
 ### Uruchomienie LAB2
 
@@ -404,7 +429,7 @@ Skrypty setup zachowują opcje opisane na początku README. API działa pod `htt
 
 Ścieżki SQLite są względne do katalogu uruchomienia. Skrypty setup przechodzą do katalogu projektu. Używaj dwóch różnych plików baz. Nowy zbiór baz powinien mieć nowy prefiks Redis, aby nie odczytać kopii poprzedniego zbioru. `.env.example` jest wzorem konfiguracji — aplikacja nie wczytuje go automatycznie. Po zmianie zmiennych środowiska zatrzymaj i uruchom Uvicorn ponownie; samo `--reload` nie przejmuje środowiska terminala.
 
-Schemat tworzy kod przy starcie przez `create_all()`, bez kasowania danych. Operacja nie aktualizuje istniejących kolumn; zmiany schematu wymagają migracji. `.gitignore` wyklucza lokalne bazy, pliki pomocnicze SQLite i `.env`. Compose udostępnia Redis 7 tylko na `127.0.0.1:6379`; cache jest odtwarzalny, bez zapisu na dysku.
+Brakujące pliki baz i tabele tworzy `main.py` przy starcie, razem z indeksami nowych tabel. `create_all()` nie aktualizuje struktury istniejących tabel; po zmianie modeli bazy odtwarzamy w czasie developmentu. `.gitignore` wyklucza lokalne bazy, pliki pomocnicze SQLite i `.env`. Compose udostępnia Redis 7 tylko na `127.0.0.1:6379`; cache jest odtwarzalny, bez zapisu na dysku.
 
 ### Uzupełnienie kontraktu API
 
@@ -421,6 +446,8 @@ Schemat tworzy kod przy starcie przez `create_all()`, bez kasowania danych. Oper
 | GET | `/orders/{id}` | `200`, `Order` i `X-Cache` | `404`, `422`, `503` |
 | POST | `/orders/{id}/pack` | `200`, zamówienie `PACKED` | `404`, `409`, `422`, `503` |
 
+Endpointy przyjęć Inventory opisano w punkcie 3. Wszystkie korzystają z tej samej bazy `inventory.db`; nie dochodzi nowy adres bazy ani osobny serwer Inbound.
+
 Korekta przyjmuje `{"quantity":14}`; typ musi być całkowity i nieujemny. Korekta poniżej sumy rezerwacji: `409`, `{"detail":"Quantity cannot be lower than reserved stock"}`. Brak zamówienia: `404`, `{"detail":"Order not found"}`. Pakowanie przed rezerwacją: `409`, `{"detail":"Order must be reserved before packing"}`. Rozpoznana kolizja UUID zamówienia: `409`, `{"detail":"Order already exists"}` bez nadpisania danych. Pozostałe błędy bazy: `503`, `{"detail":"Database unavailable"}`. Istniejące odpowiedzi Inventory i błędy walidacji z sekcji 3 zachowano.
 
 Przykład `POST /orders`:
@@ -433,14 +460,14 @@ Odpowiedź zawiera te same pola oraz serwerowy UUID `id` i `status: "NEW"`. `/re
 
 ### Cache, TTL i awarie
 
-Cache-aside obejmuje wyłącznie szczegóły stanu i zamówienia. Listy czytają bazę. Do Redis trafia serializowana odpowiedź Pydantic, a nie obiekt ORM lub sesja. Adapter pobrany z ZIP sprawdza poprawność JSON, natomiast `cached_read()` dodatkowo sprawdza schemat Pydantic i UUID; uszkodzona kopia jest odtwarzana. Nie cache’ujemy 404.
+Cache-aside obejmuje wyłącznie szczegóły stanu i zamówienia. Listy i odczyty przyjęć czytają bazę. Do Redis trafia serializowana odpowiedź Pydantic, a nie obiekt ORM lub sesja. Adapter pobrany z ZIP sprawdza poprawność JSON, natomiast `cached_read()` dodatkowo sprawdza schemat Pydantic i UUID; uszkodzona kopia jest odtwarzana. Nie cache’ujemy 404.
 
 | Odczyt | Klucz dla prefiksu `lab2:131427:warehouse` | TTL | Unieważnienie |
 |---|---|---|---|
-| `GET /stocks/{id}` | `lab2:131427:warehouse:inventory:stock:<UUID>` | 60 s | Udana rezerwacja i korekta ilości |
+| `GET /stocks/{id}` | `lab2:131427:warehouse:inventory:stock:<UUID>` | 60 s | Udana rezerwacja, korekta ilości i księgowanie przyjęcia |
 | `GET /orders/{id}` | `lab2:131427:warehouse:outbound:order:<UUID>` | 60 s | Udane pakowanie |
 
-Nagłówek `X-Cache`: **MISS** — brak kopii i odczyt z bazy; **HIT** — odpowiedź z cache bez odczytu repozytorium; **BYPASS** — awaria GET lub SET Redis, odpowiedź z bazy. Przy 404 nagłówek nie jest wymagany. Po udanym zapisie repozytorium najpierw zatwierdza **commit**, a serwis dopiero później wykonuje **DEL**. Odrzucona operacja nie zmienia danych ani poprawnej kopii.
+Nagłówek `X-Cache`: **MISS** — brak kopii i odczyt z bazy; **HIT** — odpowiedź z cache bez odczytu repozytorium; **BYPASS** — awaria GET lub SET Redis, odpowiedź z bazy. Przy 404 nagłówek nie jest wymagany. Po udanym zapisie repozytorium najpierw zatwierdza **commit**, a serwis dopiero później wykonuje **DEL**. Przy księgowaniu przyjęcia usuwa kopie wszystkich zmienionych stanów. Odrzucona operacja nie zmienia danych ani poprawnej kopii.
 
 Użyto parametrów `make_redis()` z ZIP: `socket_connect_timeout=0.3`, `socket_timeout=0.3` oraz `Retry(NoBackoff(), 0)`. Awaria GET, SET lub DELETE nie blokuje sprawnej bazy. Błąd DELETE jest logowany i nie cofa już zatwierdzonej operacji.
 
@@ -450,7 +477,7 @@ Nieudane unieważnienie może pozostawić stary wpis do końca TTL, także po pr
 
 ### Testy i dowody LAB2
 
-Przed zmianami: **22 passed**. Po rozbudowie: **50 passed**. Testy automatyczne uruchomiono poleceniem:
+LAB1: **22 passed**; LAB2 przed włączeniem przyjęć: **50 passed**. Aktualnie: **73 passed**, w tym 23 przypadki dla przyjęć i tworzenia nowej bazy. Testy automatyczne uruchomiono poleceniem:
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -468,6 +495,8 @@ Cztery wymagane grupy własnych testów:
 
 Zachowano scenariusze LAB1. Dodatkowo sprawdzono rollback po rzeczywistym `flush()` i błędzie commit, znaną kolizję PK, korektę ilości, dwie konkurencyjne instancje rezerwujące ten sam stan, osobne tabele właścicieli, `PRAGMA foreign_keys`, uszkodzony cache, stare dane po nieudanym DEL, kontrolowane wygaśnięcie TTL oraz `/ready` przy awarii cache i bazy. Stan `RESERVED` w scenariuszu pakowania jest przygotowywany w bazie, bo integracja między usługami nadal jest planowana.
 
+`tests/test_receipts.py` sprawdza cykl przyjęcia, walidację, anulowanie, zachowanie rezerwacji, tworzenie stanów w nowych lokalizacjach, sumowanie powtórzonych pozycji, rollback całej dostawy po błędzie zapisu, DEL wszystkich kopii dopiero po commit, awarię Redis, trwałość po restarcie, równoczesne księgowanie oraz utworzenie plików baz, tabel i indeksu unikalności od zera.
+
 Rzeczywiste procesy Redis i Uvicorna oraz żądania HTTP zweryfikowano niezależnie od atrap. Powtarzalny skrypt dla Debiana/WSL z `redis-server` w PATH:
 
 ```bash
@@ -476,7 +505,7 @@ Rzeczywiste procesy Redis i Uvicorna oraz żądania HTTP zweryfikowano niezależ
 
 Skrypt wybiera wolne porty, własny prefiks i tymczasowe bazy, a na końcu zamyka procesy i usuwa dane testowe. Nie dotyka aplikacji użytkownika ani współdzielonego Redis i nie wykonuje globalnego czyszczenia cache. Opcjonalne `--baseline-dir <katalog>` sprawdza dodatkowo restart wskazanej kopii początkowego LAB1; do raportu użyto kopii wykonanej przed edycją plików, bez odczytu historii repozytorium.
 
-[Raport z rzeczywistego wykonania](reports/lab2-verification.json) zawiera datę, wersje, hashe źródeł i wyniki. Do demonstracji TTL skrypt używa 2 s, a do odtworzenia starej kopii 5 s. Normalny TTL aplikacji wynosi 60 s. Testy z atrapą nie zastępują pomiaru wygaśnięcia na serwerze Redis.
+[Raport z rzeczywistego wykonania](reports/lab2-verification.json) zawiera historyczne wyniki LAB2 z 03.11.2026, sprzed dodania przyjęć. Nowe przyjęcia zweryfikowano testami API z SQLite i atrapą Redis; nie przypisujemy ich temu raportowi. Do demonstracji TTL skrypt używa 2 s, a do odtworzenia starej kopii 5 s. Normalny TTL aplikacji wynosi 60 s. Testy z atrapą nie zastępują pomiaru wygaśnięcia na serwerze Redis.
 
 | Scenariusz | Stan początkowy i żądanie | Oczekiwany wynik | Wynik rzeczywisty | Reset |
 |---|---|---|---|---|
@@ -493,7 +522,7 @@ Skrypt wybiera wolne porty, własny prefiks i tymczasowe bazy, a na końcu zamyk
 
 Do samodzielnej prezentacji użyj `/docs`, aby odczytać UUID, wykonać rezerwację i korektę. Nagłówki można obejrzeć przez `curl -i http://127.0.0.1:8101/stocks/<UUID>` (Windows: `curl.exe -i ...`). TTL własnego klucza: `docker compose exec redis redis-cli TTL 'lab2:131427:warehouse:inventory:stock:<UUID>'`. Używaj rzeczywistego UUID i prefiksu. Nie wykonuj `FLUSHALL` ani `FLUSHDB`.
 
-Reset doświadczenia: zatrzymaj aplikację, wybierz nowe ścieżki baz i nowy prefiks. Przy normalnym restarcie pozostaw pliki baz. Nie usuwaj danych jako sposobu aktualizacji schematu.
+Reset podczas developmentu: zatrzymaj aplikację, usuń lokalne pliki `inventory.db` i `outbound.db`, a następnie uruchom ją ponownie. Powstaną puste bazy z aktualnymi tabelami i indeksami oraz początkowym produktem. Reset usuwa zapisane dane. Po resecie ustaw nowy `CACHE_PREFIX`, aby nie korzystać z kopii poprzednich danych w Redis. Przy normalnym restarcie pozostaw pliki baz.
 
 ### Porównanie i ograniczenia LAB2
 
@@ -505,7 +534,7 @@ Reset doświadczenia: zatrzymaj aplikację, wybierz nowe ścieżki baz i nowy pr
 | Awaria | Proces nie obsługuje żądań | Listy i zapisy nie działają | BYPASS, sprawna baza działa dalej |
 | Główny problem | Utrata stanu | Transakcje, blokady, schemat i kopie bezpieczeństwa | Aktualność, TTL, nieudane DEL |
 
-Dla klienta dotychczasowe API i błędy są zachowane, a zapis przestał znikać po restarcie; doszły nagłówki cache i dwa endpointy rozszerzające. Wewnątrz zmieniono słowniki na repozytoria, sesje i transakcje oraz dodano opcjonalny cache.
+Dla klienta dotychczasowe API i błędy są zachowane, a zapis przestał znikać po restarcie; doszły nagłówki cache, korekta ilości, gotowość oraz moduł przyjęć Inventory. Wewnątrz zmieniono słowniki na repozytoria, sesje i transakcje oraz dodano opcjonalny cache.
 
 Inventory i Outbound nadal działają w jednym procesie FastAPI. Dodanie bazy i Redis samo nie tworzy systemu niezależnych mikrousług. Osobne bazy i odpowiedzialności przygotowują przyszłe wydzielenie procesów i integrację HTTP. Druga usługa powinna zmieniać cudze dane przez API, bez bezpośredniego zapisu do jej tabel.
 
@@ -513,7 +542,7 @@ Awaria procesu przerywa obsługę żądań, ale nie usuwa zatwierdzonych danych.
 
 Zmiana SQLite na PostgreSQL wymaga sterownika, konfiguracji, schematu/migracji, sprawdzenia UUID i JSON, ograniczeń, izolacji i blokad oraz testów współbieżności. `BEGIN IMMEDIATE` jest mechanizmem SQLite. Wariant PostgreSQL nie był testowany, ORM nie zapewnia automatycznej zgodności. `create_all()` nie migruje kolumn; Alembic pozostaje rozszerzeniem.
 
-Brakuje jeszcze integracji HTTP między modułami, zwalniania rezerwacji, przyjęć i wysyłek, uwierzytelniania oraz mechanizmu naprawy unieważnień poza TTL. Cache odpowiedzi z danymi odbiorcy wymaga ograniczenia dostępu do Redis. Na tym etapie jest on wystawiony wyłącznie lokalnie. Nie deklarujemy gotowości produkcyjnej.
+Brakuje jeszcze integracji HTTP Inventory–Outbound, zwalniania rezerwacji, wysyłek, uwierzytelniania oraz mechanizmu naprawy unieważnień poza TTL. Przyjęcia są częścią Inventory; anulowanie po `POSTED` wymagałoby osobnego mechanizmu odwrócenia dostawy. Cache odpowiedzi z danymi odbiorcy wymaga ograniczenia dostępu do Redis. Na tym etapie jest on wystawiony wyłącznie lokalnie. Nie deklarujemy gotowości produkcyjnej.
 
 ### Dokumentacja, autorzy i AI — LAB2
 

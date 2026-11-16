@@ -9,10 +9,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.cache import JsonCache, make_redis
 from app.database import Base, make_database
-from app.db_models import OrderRow, StockRow
-from app.repositories import OrderRepository, StockRepository
-from app.routers import health, orders, stocks
+from app.db_models import OrderRow, ReceiptRow, StockRow
+from app.repositories import OrderRepository, ReceiptRepository, StockRepository
+from app.routers import health, orders, receipts, stocks
 from app.services.orders import OrderService
+from app.services.receipts import ReceiptService
 from app.services.stocks import StockService
 
 
@@ -35,24 +36,27 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
                 os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"))
             resources.callback(client.close)
             # Base pochodzi z ZIP. Każda baza otrzymuje wyłącznie tabelę swojej domeny.
-            Base.metadata.create_all(engine, tables=[StockRow.__table__])
+            Base.metadata.create_all(engine, tables=[StockRow.__table__, ReceiptRow.__table__])
             Base.metadata.create_all(outbound_engine, tables=[OrderRow.__table__])
             app.state.engine = engine
             app.state.outbound_engine = outbound_engine
             app.state.redis = client
             app.state.stock_repository = StockRepository(sessions)
+            app.state.receipt_repository = ReceiptRepository(sessions)
             app.state.order_repository = OrderRepository(outbound_sessions)
             app.state.stock_cache = JsonCache(client, prefix=f"{prefix}:inventory", ttl=ttl, resource_name="stock")
             app.state.order_cache = JsonCache(client, prefix=f"{prefix}:outbound", ttl=ttl, resource_name="order")
             app.state.stock_service = StockService(app.state.stock_repository, app.state.stock_cache)
+            app.state.receipt_service = ReceiptService(app.state.receipt_repository, app.state.stock_cache)
             app.state.order_service = OrderService(app.state.order_repository, app.state.order_cache)
             app.state.stock_repository.seed()
             yield
 
-    app = FastAPI(title="Magazyn — Inventory i Outbound", version="0.2.0",
-                  description="LAB2: SQLite i Redis na bazie oficjalnego kodu pomocniczego", lifespan=lifespan)
+    app = FastAPI(title="Magazyn — Inventory i Outbound", version="0.3.0",
+                  description="Inventory: stany i przyjęcia; Outbound: zamówienia. SQLite i Redis.", lifespan=lifespan)
     app.include_router(health.router)
     app.include_router(stocks.router)
+    app.include_router(receipts.router)
     app.include_router(orders.router)
 
     @app.exception_handler(SQLAlchemyError)
