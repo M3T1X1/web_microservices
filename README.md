@@ -1,6 +1,6 @@
-# System magazynowy — Inventory i Outbound
+# System magazynowy — Inventory, Outbound, Shipping i Auth
 
-Inventory odpowiada za stany, rezerwacje i przyjęcia towaru. **Inbound jest modułem Inventory**, korzysta z tej samej bazy i transakcji. Outbound odpowiada za zamówienia, a Shipping pozostaje planowaną usługą. Inventory i Outbound działają obecnie w jednym procesie FastAPI, z osobnymi bazami SQLite i opcjonalnym cache Redis.
+Docelowo system obejmuje cztery mikrousługi: Inventory, Outbound, Shipping i Auth. **Zaimplementowane są Inventory i Outbound**; Shipping i Auth pozostają planowane. Inventory odpowiada za stany, rezerwacje i przyjęcia towaru. **Inbound jest modułem Inventory**, korzysta z tej samej bazy i transakcji. Outbound odpowiada za zamówienia, Shipping będzie obsługiwać wysyłkę, a Auth — konta, logowanie i role. Inventory i Outbound działają obecnie w jednym procesie FastAPI, z osobnymi bazami SQLite i opcjonalnym cache Redis.
 
 ## Uruchomienie i testy
 
@@ -36,6 +36,8 @@ Opcje można łączyć, np. `bash scripts/setup.sh --setup-only --test`. Na Wind
 
 Domyślnie API działa pod `http://127.0.0.1:8101`, status pod `/health`, a dokumentacja pod `/docs`. Serwer jest dostępny lokalnie; zatrzymanie: `Ctrl+C`.
 
+Uruchomienie obejmuje tylko Inventory i Outbound. Shipping i Auth nie mają jeszcze kodu, baz ani osobnych procesów; obecne endpointy nie wymagają logowania.
+
 ### Uruchomienie ręczne (Windows)
 
 ```powershell
@@ -48,6 +50,8 @@ python -m venv .venv
 W drugim terminalu: `Invoke-RestMethod http://localhost:8101/health`. Dokumentacja: [Swagger UI](http://localhost:8101/docs). Zatrzymanie serwera: `Ctrl+C`. Nie trzeba aktywować środowiska. Zmień `replace-me` w aplikacji i teście na nazwę usługi.
 
 ## Struktura kodu
+
+Poniższe pliki dotyczą zaimplementowanych domen Inventory i Outbound. Pliki Shipping i Auth powstaną w kolejnym etapie.
 
 - `app/main.py` — inicjalizacja baz, serwisów i rejestracja routerów.
 - `app/models/order.py` — modele zamówień i walidacja danych.
@@ -66,15 +70,18 @@ W drugim terminalu: `Invoke-RestMethod http://localhost:8101/health`. Dokumentac
 
 Inventory pomaga pracownikowi magazynu kontrolować ilość i dostępność towaru. Odpowiada za stany, lokalizacje, rezerwacje i przyjęcia dostaw wraz z danymi dostawcy; nie obsługuje kompletacji ani wysyłki.
 
+Planowany Auth będzie uwierzytelniać pracowników i zarządzać ich rolami. Auth wydaje token, a każda usługa sprawdza uprawnienia do swoich operacji. Konta i hasła należą wyłącznie do Auth.
+
 Pojęcia: **SKU** — kod produktu; **lokalizacja** — miejsce składowania; **rezerwacja** — towar przydzielony zamówieniu; **dostępność** — ilość pomniejszona o rezerwacje; **przyjęcie** — dostawa księgowana na stan Inventory.
 
-| Planowana usługa | Odpowiedzialność | Własne dane | Operacje | Potrzebne informacje od innej usługi |
+| Usługa i etap | Odpowiedzialność | Własne dane | Operacje | Docelowo potrzebne informacje od innej usługi |
 |---|---|---|---|---|
-| Inventory (z przyjęciami)| Stany, rezerwacje i dostawy | `Stock`, `Receipt` | Odczyt, korekta, rezerwacja, rejestracja i księgowanie przyjęć | Identyfikator zamówienia z Outbound |
-| Outbound| Realizacja zamówień | `Order` | Przyjęcie zamówienia, kompletacja, pakowanie | Dostępność i potwierdzenie rezerwacji z Inventory |
-| Shipping| Wysyłka paczek | `Shipment` | Rejestracja przesyłki, wydanie kurierowi | Potwierdzenie spakowania z Outbound |
+| Inventory (z przyjęciami), zaimplementowane | Stany, rezerwacje i dostawy | `Stock`, `Receipt` | Odczyt, korekta, rezerwacja, rejestracja i księgowanie przyjęć | Identyfikator zamówienia z Outbound; tożsamość i rola z tokenu Auth |
+| Outbound, zaimplementowane | Realizacja zamówień | `Order` | Przyjęcie zamówienia, kompletacja, pakowanie | Dostępność i potwierdzenie rezerwacji z Inventory; tożsamość i rola z tokenu Auth |
+| Shipping, planowane | Wysyłka paczek | `Shipment` | Rejestracja przesyłki, wydanie kurierowi | Potwierdzenie spakowania z Outbound; tożsamość i rola z tokenu Auth |
+| Auth, planowana czwarta usługa | Konta, logowanie i role | `User` | Tworzenie kont przez administratora, logowanie, wydawanie JWT, odczyt własnego profilu | Nie wymaga danych magazynowych ani zamówień |
 
-Każda usługa zapisuje własne dane: Inventory — stany, rezerwacje i przyjęcia, Outbound — zamówienia, Shipping — przesyłki. Księgowanie przyjęcia zmienia stany wewnętrznie, w tej samej transakcji Inventory; zmiany danych innej usługi wymagają API.
+Każda usługa zapisuje własne dane: Inventory — stany, rezerwacje i przyjęcia, Outbound — zamówienia, docelowo Shipping — przesyłki, a Auth — konta i role. Księgowanie przyjęcia zmienia stany wewnętrznie, w tej samej transakcji Inventory; zmiany danych innej usługi wymagają API. Inventory, Outbound i Shipping nie zapisują haseł ani nie modyfikują bazy Auth.
 
 Przyszłe HTTP: **Outbound → Inventory**, `POST /stocks/{id}/reservations`, żądanie `{"order_id":"22222222-2222-4222-8222-222222222222","quantity":3}`, odpowiedź `201` z utworzoną rezerwacją. Przy niedostępności Inventory zamówienie pozostaje `NEW`, bez potwierdzenia rezerwacji. Integracja HTTP nie jest jeszcze zaimplementowana.
 
@@ -105,6 +112,12 @@ Para `(sku, location)` jest unikalna w bazie Inventory.
 `Shipment`: `id` — UUID serwera; `order_id` — UUID zamówienia; `carrier` — niepusty tekst; `weight_kg` — liczba > 0; `status` — początkowo `NEW`; `handed_over_at` — data i godzina wydania, początkowo brak.
 
 **Reguła:** tylko przesyłkę `READY` można wydać kurierowi; otrzymuje wtedy status `HANDED_OVER` i czas wydania. Niedozwolona operacja zwraca `409` bez zmiany danych.
+
+### Auth — `User` (planowana czwarta usługa)
+
+`User`: `id` — UUID serwera; `email` — wymagany poprawny i unikalny adres; `password_hash` — hash hasła, np. Argon2id; `role` — `ADMIN`, `WAREHOUSE` lub `SHIPPING`; `is_active` — wartość logiczna, początkowo `true`. Utworzenie konta przyjmuje hasło, a odpowiedź z profilem nie zawiera hasła ani jego hasha.
+
+**Reguła:** tylko `ADMIN` może tworzyć konta (`201`); próba wykonania tej operacji przez `WAREHOUSE` lub `SHIPPING` daje `403`, bez zapisu użytkownika. Logowanie wymaga poprawnego hasła i aktywnego konta; w przeciwnym razie zwraca `401` bez wydania tokenu. Są to wymagania planowane, jeszcze niezaimplementowane.
 
 ## 3. Kontrakt API
 
@@ -154,6 +167,24 @@ Odpowiedź zawiera te same dane oraz UUID `id` i `status: "NEW"`. Zwrócony UUID
 
 Brak przyjęcia: `404`, `{"detail":"Receipt not found"}`. Księgowanie przed zatwierdzeniem, ponowne księgowanie albo księgowanie po anulowaniu: `409`, `{"detail":"Only ACCEPTED receipts can be posted"}`. Anulowanie zaksięgowanego przyjęcia daje `409`; nie odejmuje towaru od stanu.
 
+### Auth — planowany kontrakt (jeszcze niedostępny)
+
+| Metoda | Ścieżka | Znaczenie | Sukces | Błędy |
+|---|---|---|---|---|
+| POST | `/auth/login` | Logowanie aktywnego użytkownika i wydanie JWT | 200 | 401, 422 |
+| GET | `/auth/me` | Własny profil po uwierzytelnieniu | 200 | 401 |
+| POST | `/auth/users` | Utworzenie konta przez `ADMIN` | 201 | 401, 403, 409, 422 |
+
+Przykładowe przyszłe logowanie:
+
+```json
+{"email":"pracownik@example.com","password":"przykladowe-haslo"}
+```
+
+Odpowiedź: `200`, `{"access_token":"<JWT>","token_type":"bearer"}`. Klient dołącza `Authorization: Bearer <JWT>` do żądań. Usługi lokalnie sprawdzają podpis, wystawcę, odbiorcę i czas ważności tokenu oraz rolę wymaganą przez endpoint; nie wywołują Auth przy każdym żądaniu. Hasło nie jest umieszczane w tokenie.
+
+Administrator utworzy konto przez `/auth/users`, przekazując `email`, `password` i `role`; odpowiedź zawiera UUID, email, rolę i `is_active`. `409` oznacza zajęty email. `401` oznacza błędne logowanie albo brak poprawnego tokenu, a `403` — poprawny token bez wymaganych uprawnień. Planowane przykłady: `{"detail":"Invalid credentials"}` i `{"detail":"Insufficient permissions"}`. Obecne Inventory i Outbound nie weryfikują jeszcze tokenów; te endpointy Auth nie pojawiają się obecnie w Swaggerze.
+
 ## 4. Testy i stan danych
 
 Poniższa tabela i wynik 22 testów dokumentują LAB1. Aktualny zestaw obejmuje też SQLite, Redis i przyjęcia; jego wynik znajduje się w punkcie 10.
@@ -177,23 +208,30 @@ Wynik `.\.venv\Scripts\python.exe -m pytest -q`: **22 passed** (Inventory, Outbo
 
 Eksperyment HTTP wykonano bez `--reload` i zmian kodu. Rezerwacja przetrwała kolejne żądania, ale zniknęła po restarcie: dane są w pamięci procesu, a `create_app()` odtwarza produkt początkowy.
 
+Planowane testy Auth: poprawne logowanie i odczyt `/auth/me`, odrzucenie błędnego hasła lub nieaktywnego konta (`401`), odrzucenie nieważnego tokenu (`401`), utworzenie konta przez `ADMIN` oraz odmowa dla innej roli (`403`) bez zmiany danych. Testy i ich wyniki powstaną razem z implementacją Auth; nie są wliczone do obecnego zestawu. Shipping również nie jest jeszcze testowany.
+
 ## 5. Porównanie architektur
 
 ```text
 Monolit:
-[1 proces: Inventory (stany + przyjęcia) + Outbound + Shipping] -> [wspólna baza]
+[1 proces: Inventory (stany + przyjęcia) + Outbound + Shipping + Auth] -> [wspólna baza]
 
 Modularny monolit (strzałki wewnątrz = wywołania funkcji):
-[1 proces: Inventory (stany + przyjęcia) <- Outbound <- Shipping] -> [baza: tabele modułów]
+[1 proces: Inventory (stany + przyjęcia) <- Outbound <- Shipping; Auth: konta i role]
+    -> [baza: tabele modułów]
 
-Mikrousługi (każdy nawias = osobny proces i własna baza):
+Mikrousługi (każda usługa = osobny proces i własna baza):
 [Inventory/Stock + Receipt] <--HTTP-- [Outbound/Order] <--HTTP-- [Shipping/Shipment]
+[Klient] --HTTP: logowanie--> [Auth/User]
+[Klient] --HTTP + JWT--> Inventory / Outbound / Shipping (lokalna weryfikacja tokenu)
 ```
 
 1. Inventory ma własne dane i API oraz może działać w osobnym procesie; moduł jest częścią aplikacji.
-2. W monolicie przyjęcia, stany, zamówienia i wysyłka działałyby w jednym procesie ze wspólną bazą.
-3. Podział daje niezależne wdrażanie, ale dodaje opóźnienia sieci i awarie zależności; brak Inventory blokuje rezerwacje.
+2. W monolicie przyjęcia, stany, zamówienia, wysyłka oraz konta i logowanie działałyby w jednym procesie ze wspólną bazą.
+3. Podział daje niezależne wdrażanie, ale dodaje opóźnienia sieci i awarie zależności; brak Inventory blokuje rezerwacje, a brak Auth nowe logowania.
 4. Modularny monolit — prostsze wdrażanie i utrzymanie przy małej skali.
+
+Schematy pokazują docelowy system czterech usług. Obecnie działają tylko Inventory i Outbound w jednym procesie; Shipping i Auth nie są zaimplementowane.
 
 ## 6. Dokumentacja wykorzystana podczas pracy
 
@@ -201,14 +239,17 @@ Mikrousługi (każdy nawias = osobny proces i własna baza):
 |---|---|---|---|
 | [FastAPI — Path operation](https://fastapi.tiangolo.com/tutorial/first-steps/#step-3-create-a-path-operation) | Obsługa żądania GET | `@app.get("/health")` | Test sprawdza `200` i JSON |
 | [FastAPI — TestClient](https://fastapi.tiangolo.com/tutorial/testing/#using-testclient) | Testowanie API | `TestClient(create_app())` | `pytest tests/test_health.py`: **1 passed** |
+| [OWASP — Access Control i JWT](https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html#access-control), [Password Storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) | Projektowanie logowania i uprawnień Auth | Plan: hash hasła, JWT i kontrola ról w usługach; bez implementacji | Przegląd projektu; testy Auth są dopiero planowane |
 
 ## 7. Ograniczenia, autorzy i AI
 
-Dane są trwałe w SQLite. Przyjęcia należą do Inventory; brakuje jeszcze automatycznej integracji Inventory–Outbound, zwalniania rezerwacji i wysyłki. Redis może zwracać starą kopię do wygaśnięcia TTL.
+Dane są trwałe w SQLite. Przyjęcia należą do Inventory; brakuje jeszcze automatycznej integracji Inventory–Outbound, zwalniania rezerwacji i wysyłki. Shipping i Auth są planowane. Obecnie nie ma kont, logowania, wydawania JWT ani kontroli ról w endpointach. Redis może zwracać starą kopię do wygaśnięcia TTL.
 
 - AI: ChatGPT pomógł w testach i endpointach; weryfikacja przez przegląd kodu i test `/health`.
 
 ## 8. Podział systemu na usługi
+
+Docelowo: cztery usługi. Inventory i Outbound są zaimplementowane; Shipping i Auth powstaną później.
 
 ### Serwis Magazynu i Przyjęć (Inventory)
 
@@ -238,7 +279,7 @@ Inbound jest modułem tej usługi, bez osobnego procesu, bazy i integracji HTTP 
 - Rejestrowanie dostaw od dostawców.
 - Obsługę przekazania paczek kurierowi.
 
-### Serwis Wysyłki i Kurierów (Shipping)
+### Serwis Wysyłki i Kurierów (Shipping — planowany)
 
 **Usługa odpowiada za:**
 - Rejestrowanie przesyłek dla spakowanych zamówień.
@@ -250,9 +291,22 @@ Inbound jest modułem tej usługi, bez osobnego procesu, bazy i integracji HTTP 
 - Zarządzanie stanami magazynowymi.
 - Generowanie etykiet i obsługę numerów śledzenia.
 
+### Serwis Kont i Logowania (Auth — planowana czwarta usługa)
+
+**Usługa będzie odpowiadać za:**
+- Przechowywanie kont pracowników, hashy haseł, ról i aktywności kont.
+- Sprawdzanie danych logowania oraz wydawanie podpisanych JWT z czasem ważności.
+- Tworzenie kont przez administratora i udostępnianie własnego profilu.
+
+**Usługa nie będzie odpowiadać za:**
+- Zarządzanie towarem, przyjęciami, zamówieniami ani przesyłkami.
+- Podejmowanie decyzji biznesowych, np. czy wystarczy towaru na rezerwację.
+
+Planowane role: `ADMIN` — konta i wszystkie operacje; `WAREHOUSE` — Inventory i Outbound; `SHIPPING` — wysyłka. Każda usługa będzie weryfikować token i uprawnienia do własnych endpointów. Auth będzie mieć osobną bazę i docelowo osobny proces; obecnie nie jest uruchamiany.
+
 ## 9. Modele danych
 
-Inventory ma dwie tabele we własnej bazie: `stocks` i `receipts`. Outbound ma tabelę `orders` w osobnej bazie; Shipping z modelem `Shipment` jest planowany. Identyfikatory UUID nadaje serwer. Pola oznaczone `↳` są elementami JSON, a nie osobnymi kolumnami.
+Inventory ma dwie tabele we własnej bazie: `stocks` i `receipts`. Outbound ma tabelę `orders` w osobnej bazie. Planowane Shipping i Auth będą mieć własne bazy: odpowiednio z przesyłkami i tabelą `users`. Identyfikatory UUID nadaje serwer. Pola oznaczone `↳` są elementami JSON, a nie osobnymi kolumnami.
 
 ### Inventory — tabela `stocks` (model `Stock`)
 
@@ -312,7 +366,7 @@ Statusy:
 - `SHIPPED` — paczka przekazana kurierowi
 - `CANCELLED` — zamówienie anulowane
 
-### Shipping — tabela `Shipment`
+### Shipping — tabela `Shipment` (planowana)
 
 Jeden rekord opisuje jedną paczkę.
 
@@ -331,6 +385,20 @@ Statusy:
 - `HANDED_OVER` — przekazana kurierowi
 - `CANCELLED` — przesyłka anulowana
 
+
+### Auth — tabela `users`, model `User` (planowane)
+
+Jeden rekord będzie opisywać konto pracownika we własnej bazie `auth.db`.
+
+| Pole | Opis |
+|---|---|
+| `id` | UUID użytkownika nadawany przez serwer |
+| `email` | Wymagany, poprawny i unikalny adres używany jako login |
+| `password_hash` | Wymagany hash hasła, np. Argon2id; niewracany w API |
+| `role` | Wymagana rola: `ADMIN`, `WAREHOUSE` lub `SHIPPING` |
+| `is_active` | Czy konto może się logować; domyślnie `true` |
+
+Planowane modele API: `UserCreate` przyjmuje email, hasło i rolę; `UserRead` zwraca UUID, email, rolę i aktywność, bez hasła i hasha. JWT jest wydawanym po logowaniu tokenem z identyfikatorem użytkownika, rolą i czasem ważności. Tabela i modele Auth jeszcze nie istnieją w kodzie.
 
 ## 10. LAB2 — baza danych i cache
 
@@ -367,6 +435,8 @@ Zachowano fabrykę `create_app()`, dotychczasowe metody i ścieżki HTTP, format
 | Inventory — ta sama baza | `receipts` | `id` UUID PK; wymagany dostawca; dozwolony status; pozycje dostawy w JSON |
 | Outbound — `outbound.db` | `orders` | `id` UUID PK; wymagane dane odbiorcy; `status` ograniczony do statusów LAB1; `items` JSON z SKU i dodatnią ilością |
 
+Tabela opisuje obecne bazy. Planowany Auth będzie właścicielem `auth.db` i tabeli `users`; pozostałe usługi nie będą odczytywać jej bezpośrednio. Bazy Shipping i Auth nie są obecnie tworzone, nie dodano ich konfiguracji ani zależności do uruchamianej aplikacji.
+
 `StockRow`, `ReceiptRow` i `OrderRow` korzystają z `Base` pobranego z ZIP-a. Inicjalizacja tworzy wyłącznie tabele właściciela danej bazy: `stocks` i `receipts` w Inventory, `orders` w Outbound. Nowa lista rezerwacji jest przypisywana jako całość, aby ORM wykrył zmianę JSON.
 
 Baza chroni klucz główny, `NOT NULL`, nieujemną ilość, dozwolone statusy oraz unikalną parę SKU–lokalizacja. Pydantic pilnuje tekstów, UUID i ścisłych typów ilości. `order_id` w rezerwacji jest odwołaniem do obcej domeny bez FK między bazami; Inventory nie kopiuje danych odbiorcy ani statusu zamówienia. Outbound nie zapisuje cudzych stanów magazynowych.
@@ -383,7 +453,7 @@ Seed dodaje `SKU-001`, `A-01`, ilość 10 i pustą listę rezerwacji tylko do pu
 
 Reguła Inventory: przy 10 sztukach rezerwacja 7 jest dozwolona, a kolejna 4 daje `409`, bez zmiany stanu. Nowa korekta nie może obniżyć `quantity` poniżej sumy rezerwacji: przy rezerwacji 3 można ustawić 3, lecz nie 2. Reguła Outbound: tylko `RESERVED` można zmienić na `PACKED`; `NEW` i ponowne pakowanie `PACKED` są odrzucane bez zmian.
 
-Plan integracji pozostaje **Outbound → Inventory**, `POST /stocks/{id}/reservations`. Po potwierdzeniu rezerwacji Outbound będzie mógł nadać `RESERVED`. Integracji HTTP jeszcze nie dodano; `RESERVED` w testach jest przygotowywany w bazie. Przyjęcia (dawny Inbound) działają już wewnątrz Inventory, bez wywołania HTTP między domenami. Shipping pozostaje planowany.
+Plan integracji pozostaje **Outbound → Inventory**, `POST /stocks/{id}/reservations`. Po potwierdzeniu rezerwacji Outbound będzie mógł nadać `RESERVED`. Integracji HTTP jeszcze nie dodano; `RESERVED` w testach jest przygotowywany w bazie. Przyjęcia (dawny Inbound) działają już wewnątrz Inventory, bez wywołania HTTP między domenami. Shipping i Auth pozostają planowane; tokeny i kontrola ról zostaną dodane razem z Auth.
 
 ### Uruchomienie LAB2
 
@@ -538,11 +608,13 @@ Dla klienta dotychczasowe API i błędy są zachowane, a zapis przestał znikać
 
 Inventory i Outbound nadal działają w jednym procesie FastAPI. Dodanie bazy i Redis samo nie tworzy systemu niezależnych mikrousług. Osobne bazy i odpowiedzialności przygotowują przyszłe wydzielenie procesów i integrację HTTP. Druga usługa powinna zmieniać cudze dane przez API, bez bezpośredniego zapisu do jej tabel.
 
+Docelowo dołączą Shipping i Auth jako trzecia i czwarta usługa. Obecne testy, raporty i konfiguracja uruchomienia dotyczą wyłącznie zaimplementowanych Inventory i Outbound; nie potwierdzają działania planowanego logowania ani wysyłki.
+
 Awaria procesu przerywa obsługę żądań, ale nie usuwa zatwierdzonych danych. Awaria Redis pozwala działać bazie; po odzyskaniu połączenia możliwe są stare wpisy do TTL. Awaria bazy blokuje zapis i listy; gotowość to 503. Dopuszczalne opóźnienie informacyjnego podglądu wynosi 60 s, ale decyzje domenowe zawsze wymagają bazy.
 
 Zmiana SQLite na PostgreSQL wymaga sterownika, konfiguracji, schematu/migracji, sprawdzenia UUID i JSON, ograniczeń, izolacji i blokad oraz testów współbieżności. `BEGIN IMMEDIATE` jest mechanizmem SQLite. Wariant PostgreSQL nie był testowany, ORM nie zapewnia automatycznej zgodności. `create_all()` nie migruje kolumn; Alembic pozostaje rozszerzeniem.
 
-Brakuje jeszcze integracji HTTP Inventory–Outbound, zwalniania rezerwacji, wysyłek, uwierzytelniania oraz mechanizmu naprawy unieważnień poza TTL. Przyjęcia są częścią Inventory; anulowanie po `POSTED` wymagałoby osobnego mechanizmu odwrócenia dostawy. Cache odpowiedzi z danymi odbiorcy wymaga ograniczenia dostępu do Redis. Na tym etapie jest on wystawiony wyłącznie lokalnie. Nie deklarujemy gotowości produkcyjnej.
+Brakuje jeszcze integracji HTTP Inventory–Outbound, zwalniania rezerwacji, implementacji Shipping i Auth oraz mechanizmu naprawy unieważnień poza TTL. Do wdrożenia Auth pozostają konta, logowanie i sprawdzanie JWT oraz ról w pozostałych usługach. Przyjęcia są częścią Inventory; anulowanie po `POSTED` wymagałoby osobnego mechanizmu odwrócenia dostawy. Cache odpowiedzi z danymi odbiorcy wymaga ograniczenia dostępu do Redis. Na tym etapie jest on wystawiony wyłącznie lokalnie. Nie deklarujemy gotowości produkcyjnej.
 
 ### Dokumentacja, autorzy i AI — LAB2
 
