@@ -24,6 +24,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -Service
 
 Opcjonalny Redis jest uruchamiany osobno przez `docker compose up -d redis` z katalogu projektu.
 
+Serwer Eureka z [pakietu LAB3](https://pawoom.lazysolutions.pl/2026_2027/lab3/) jest przygotowany w `materials/lab3-support`. Uruchom Docker Desktop, a następnie wykonaj z katalogu projektu poniższe polecenie. Pierwsze uruchomienie buduje obraz i pobiera zależności Java wewnątrz Dockera.
+
+Na tym komputerze Norton skanuje połączenia HTTPS. Etap budowania w `eureka-server/Dockerfile` importuje jego certyfikat z `build-certs/norton-web-mail-shield.crt` do magazynu zaufania Javy, aby Maven mógł zweryfikować połączenie z repozytorium zależności.
+
+```powershell
+docker compose -p web-microservices-eureka -f .\materials\lab3-support\compose.yaml up --build -d eureka
+```
+
+Panel rejestru jest dostępny pod [localhost:8761](http://localhost:8761/), a API pod `http://127.0.0.1:8761/eureka/apps`. Kontener znajduje się w grupie `web-microservices-eureka` w Docker Desktop. Obsługa z katalogu projektu wygląda następująco.
+
+```powershell
+docker compose -p web-microservices-eureka -f .\materials\lab3-support\compose.yaml logs -f eureka
+docker compose -p web-microservices-eureka -f .\materials\lab3-support\compose.yaml stop eureka
+docker compose -p web-microservices-eureka -f .\materials\lab3-support\compose.yaml start eureka
+```
+
 ### Debian 13
 
 ```bash
