@@ -1,6 +1,7 @@
 """Wzorzec repozytorium z demo.py LAB2 zastosowany do Inventory i Outbound."""
 from __future__ import annotations
 
+import builtins
 import sqlite3
 from contextlib import contextmanager
 from uuid import UUID
@@ -111,7 +112,7 @@ class ReceiptRepository:
         return self._change_status(receipt_id, ("NEW", "ACCEPTED"), "CANCELLED",
                                    "Only NEW or ACCEPTED receipts can be cancelled")
 
-    def post(self, receipt_id: UUID) -> tuple[Receipt, list[UUID]]:
+    def post(self, receipt_id: UUID) -> tuple[Receipt, builtins.list[UUID]]:
         with write_transaction(self.sessions) as db:
             row = self._find(db, receipt_id, lock=True)
             if row.status != "ACCEPTED":

@@ -241,10 +241,9 @@ def test_fresh_databases_create_tables_and_unique_stock_index(app_factory, tmp_p
     assert not (tmp_path / "outbound.db").exists()
     with TestClient(app_factory()) as client:
         assert (tmp_path / "inventory.db").exists()
-        assert (tmp_path / "outbound.db").exists()
+        assert not (tmp_path / "outbound.db").exists()
         inventory = inspect(client.app.state.engine)
         assert inventory.get_table_names() == ["receipts", "stocks"]
-        assert inspect(client.app.state.outbound_engine).get_table_names() == ["orders"]
         stock = client.get("/stocks").json()[0]
         assert UUID(stock["id"]).version == 4
         assert stock["quantity"] == 10 and stock["reservations"] == []

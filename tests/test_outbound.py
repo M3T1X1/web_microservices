@@ -6,6 +6,11 @@ from app.db_models import OrderRow
 
 
 @pytest.fixture
+def client(outbound_client):
+    return outbound_client
+
+
+@pytest.fixture
 def order_body():
     return {
         "recipient_name": "Jan Kowalski",

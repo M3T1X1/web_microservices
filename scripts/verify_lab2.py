@@ -85,28 +85,33 @@ def verify(baseline_dir=None):
 
     with tempfile.TemporaryDirectory(prefix="warehouse-lab2-") as directory:
         temporary = Path(directory)
-        api_port, redis_port, offline_port = free_port(), free_port(), free_port()
-        while len({api_port, redis_port, offline_port}) != 3:
-            redis_port, offline_port = free_port(), free_port()
+        api_port, outbound_port, redis_port, offline_port = (free_port() for _ in range(4))
+        while len({api_port, outbound_port, redis_port, offline_port}) != 4:
+            outbound_port, redis_port, offline_port = (free_port() for _ in range(3))
         prefix = f"lab2:verification:{temporary.name}:warehouse"
         redis_url = f"redis://127.0.0.1:{redis_port}/0"
         redis = Redis.from_url(redis_url, decode_responses=True, socket_timeout=0.3,
                                socket_connect_timeout=0.3)
-        server = redis_process = None
+        servers = {"inventory": None, "outbound": None}
+        redis_process = None
         environment = {**os.environ,
             "DATABASE_URL": "sqlite:///" + (temporary / "inventory.db").as_posix(),
             "OUTBOUND_DATABASE_URL": "sqlite:///" + (temporary / "outbound.db").as_posix(),
             "REDIS_URL": redis_url, "CACHE_PREFIX": prefix, "CACHE_TTL_SECONDS": "2"}
         with (temporary / "processes.log").open("w+") as log, httpx.Client(
-                base_url=f"http://127.0.0.1:{api_port}", timeout=5, trust_env=False) as api:
-            def start_api(url=redis_url, ttl=2, source_dir=ROOT):
-                nonlocal server
-                stop(server)
-                server = subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app",
-                    "--host", "127.0.0.1", "--port", str(api_port)], cwd=source_dir,
+                base_url=f"http://127.0.0.1:{api_port}", timeout=5, trust_env=False) as api, httpx.Client(
+                base_url=f"http://127.0.0.1:{outbound_port}", timeout=5, trust_env=False) as outbound:
+            def start_api(url=redis_url, ttl=2, source_dir=ROOT, service="inventory"):
+                stop(servers[service])
+                module, port, client = {
+                    "inventory": ("app.main:app", api_port, api),
+                    "outbound": ("app.outbound:app", outbound_port, outbound),
+                }[service]
+                servers[service] = subprocess.Popen([sys.executable, "-m", "uvicorn", module,
+                    "--host", "127.0.0.1", "--port", str(port)], cwd=source_dir,
                     env={**environment, "REDIS_URL": url, "CACHE_TTL_SECONDS": str(ttl)},
                     stdout=log, stderr=log)
-                wait_until(lambda: api.get("/health").status_code == 200, server, "Uvicorn")
+                wait_until(lambda: client.get("/health").status_code == 200, servers[service], service)
 
             def start_redis():
                 nonlocal redis_process
@@ -139,9 +144,11 @@ def verify(baseline_dir=None):
 
                 start_redis()
                 start_api()
+                start_api(service="outbound")
                 report["redis_version"] = redis.info("server")["redis_version"]
                 health = api.get("/health")
-                assert health.json() == {"status": "ok", "service": "replace-me"}
+                assert health.json() == {"status": "ok", "service": "inventory"}
+                assert outbound.get("/health").json() == {"status": "ok", "service": "outbound"}
                 assert redis.ping()
                 record("health and real Redis PING", health=health.json(), redis="PONG")
                 stock_id = api.get("/stocks").json()[0]["id"]
@@ -177,31 +184,32 @@ def verify(baseline_dir=None):
                 assert conflict.status_code == 409 and api.get("/stocks").json() == [stock]
                 record("business conflict preserves state", status=409, body=conflict.json())
 
-                response = api.post("/orders", json=ORDER)
+                response = outbound.post("/orders", json=ORDER)
                 assert response.status_code == 201
                 order = response.json()
                 order_path = "/orders/" + order["id"]
-                assert api.get(order_path).headers["X-Cache"] == "MISS"
-                assert api.get(order_path).headers["X-Cache"] == "HIT"
-                assert api.post(order_path + "/pack").status_code == 409
-                assert api.get("/orders").json() == [order]
+                assert outbound.get(order_path).headers["X-Cache"] == "MISS"
+                assert outbound.get(order_path).headers["X-Cache"] == "HIT"
+                assert outbound.post(order_path + "/pack").status_code == 409
+                assert outbound.get("/orders").json() == [order]
                 record("Outbound write, cache and packing rule", order=order, packing_status=409)
 
-                stop(server)
                 redis.delete(stock_key, f"{prefix}:outbound:order:{order['id']}")
                 start_api(ttl=30)
-                for resource_path, expected in ((path, stock), (order_path, order)):
-                    response = api.get(resource_path)
+                start_api(ttl=30, service="outbound")
+                for client, resource_path, expected in ((api, path, stock), (outbound, order_path, order)):
+                    response = client.get(resource_path)
                     assert response.headers["X-Cache"] == "MISS" and response.json() == expected
-                record("Uvicorn process restart, both domains, empty cache", x_cache="MISS", state="unchanged")
+                record("Separate Uvicorn processes restart, empty cache", x_cache="MISS", state="unchanged")
 
                 stop(redis_process)
                 response = api.get(path)
                 assert response.headers["X-Cache"] == "BYPASS" and response.json() == stock
-                assert api.get(order_path).headers["X-Cache"] == "BYPASS"
+                assert outbound.get(order_path).headers["X-Cache"] == "BYPASS"
                 assert api.patch(path, json={"quantity": 18}).status_code == 200
-                assert api.post("/orders", json=ORDER).status_code == 201
+                assert outbound.post("/orders", json=ORDER).status_code == 201
                 assert api.get("/ready").json()["status"] == "degraded"
+                assert outbound.get("/ready").json()["status"] == "degraded"
                 assert api.get(path).json()["quantity"] == 18
                 record("Redis stopped: reads and writes still work", x_cache="BYPASS", quantity=18, readiness="degraded")
 
@@ -233,7 +241,8 @@ def verify(baseline_dir=None):
                 print(log.read(), file=sys.stderr)
                 raise
             finally:
-                stop(server)
+                for server in servers.values():
+                    stop(server)
                 stop(redis_process)
                 redis.close()
     return report

@@ -22,27 +22,30 @@ def stock_path(client):
 
 def test_both_domains_survive_restart_with_empty_cache(app_factory):
     first = app_factory()
-    with TestClient(first) as client:
+    first_outbound = app_factory(service="outbound")
+    with TestClient(first) as client, TestClient(first_outbound) as outbound:
         path = stock_path(client)
         assert client.post(path + "/reservations", json=RESERVATION).status_code == 201
         assert client.patch(path, json={"quantity": 14}).status_code == 200
         stock = client.get(path).json()
-        order = client.post("/orders", json=ORDER_BODY).json()
+        order = outbound.post("/orders", json=ORDER_BODY).json()
         order_path = "/orders/" + order["id"]
-        assert client.get(order_path).json() == order
+        assert outbound.get(order_path).json() == order
     assert first.state.redis.closed
-    with TestClient(app_factory()) as client:
-        for path, expected in ((path, stock), (order_path, order)):
-            response = client.get(path)
+    assert first_outbound.state.redis.closed
+    with TestClient(app_factory()) as client, TestClient(app_factory(service="outbound")) as outbound:
+        for api, resource_path, expected in ((client, path, stock), (outbound, order_path, order)):
+            response = api.get(resource_path)
             assert response.status_code == 200
             assert response.headers["X-Cache"] == "MISS"
             assert response.json() == expected
         assert client.get("/stocks").json() == [stock]
-        assert client.get("/orders").json() == [order]
+        assert outbound.get("/orders").json() == [order]
 
 
 @pytest.mark.parametrize("domain", ["stock", "order"])
-def test_miss_hit_skips_repository(client, monkeypatch, domain):
+def test_miss_hit_skips_repository(client, outbound_client, monkeypatch, domain):
+    client = client if domain == "stock" else outbound_client
     path = (stock_path(client) if domain == "stock" else
             "/orders/" + client.post("/orders", json=ORDER_BODY).json()["id"])
     repository = getattr(client.app.state, domain + "_repository")
@@ -91,7 +94,8 @@ def test_reservation_and_update_invalidate_only_after_commit(client, monkeypatch
     assert result.json()["quantity"] == 15
 
 
-def test_pack_invalidates_order_cache(client):
+def test_pack_invalidates_order_cache(outbound_client):
+    client = outbound_client
     order = client.post("/orders", json=ORDER_BODY).json()
     order_id = UUID(order["id"])
     state = client.app.state
@@ -108,13 +112,14 @@ def test_pack_invalidates_order_cache(client):
 
 
 @pytest.mark.parametrize("operation", ["get", "set", "delete", "all"])
-def test_cache_outage_does_not_block_read_or_writes(client, operation):
+def test_cache_outage_does_not_block_read_or_writes(client, outbound_client, operation):
     path = stock_path(client)
     state = client.app.state
-    if operation == "all":
-        state.redis.down = True
-    else:
-        state.redis.fail.add(operation)
+    for redis in (state.redis, outbound_client.app.state.redis):
+        if operation == "all":
+            redis.down = True
+        else:
+            redis.fail.add(operation)
     result = client.get(path)
     assert result.status_code == 200
     assert result.headers["X-Cache"] == ("MISS" if operation == "delete" else "BYPASS")
@@ -122,16 +127,17 @@ def test_cache_outage_does_not_block_read_or_writes(client, operation):
     assert client.patch(path, json={"quantity": 18}).status_code == 200
     stock = state.stock_repository.get(UUID(path.rsplit("/", 1)[1]))
     assert stock.quantity == 18 and stock.reservations[0].quantity == 3
-    response = client.post("/orders", json=ORDER_BODY)
+    response = outbound_client.post("/orders", json=ORDER_BODY)
     assert response.status_code == 201
     order_id = UUID(response.json()["id"])
-    order_response = client.get(f"/orders/{order_id}")
+    order_response = outbound_client.get(f"/orders/{order_id}")
     assert order_response.status_code == 200
     assert order_response.headers["X-Cache"] == ("MISS" if operation == "delete" else "BYPASS")
-    with state.order_repository.sessions.begin() as db:
+    order_repository = outbound_client.app.state.order_repository
+    with order_repository.sessions.begin() as db:
         db.get(OrderRow, order_id).status = "RESERVED"
-    assert client.post(f"/orders/{order_id}/pack").json()["status"] == "PACKED"
-    assert state.order_repository.get(order_id).status == "PACKED"
+    assert outbound_client.post(f"/orders/{order_id}/pack").json()["status"] == "PACKED"
+    assert order_repository.get(order_id).status == "PACKED"
 
 
 def test_failed_invalidation_leaves_stale_value_until_ttl(client):
@@ -181,10 +187,11 @@ def test_invalid_quantity_update_is_422(client, quantity):
 
 
 @pytest.mark.parametrize("domain", ["stock", "order"])
-def test_flushed_write_rolls_back_on_commit_error(client, domain):
+def test_flushed_write_rolls_back_on_commit_error(client, outbound_client, domain):
     path = stock_path(client)
     before = client.get(path).json()
-    repository = getattr(client.app.state, domain + "_repository")
+    target = client if domain == "stock" else outbound_client
+    repository = getattr(target.app.state, domain + "_repository")
 
     def fail_commit(db):
         db.flush()  # Zapis faktycznie dotarł do bazy, ale jeszcze nie ma commit.
@@ -193,19 +200,20 @@ def test_flushed_write_rolls_back_on_commit_error(client, domain):
     event.listen(repository.sessions, "before_commit", fail_commit)
     try:
         response = (client.patch(path, json={"quantity": 99}) if domain == "stock"
-                    else client.post("/orders", json=ORDER_BODY))
+                    else outbound_client.post("/orders", json=ORDER_BODY))
         assert response.status_code == 503
         assert response.json() == {"detail": "Database unavailable"}
         assert client.get("/stocks").json() == [before]
-        assert client.get("/orders").json() == []
+        assert outbound_client.get("/orders").json() == []
         assert client.get(path).headers["X-Cache"] == "HIT"
     finally:
         event.remove(repository.sessions, "before_commit", fail_commit)
     assert client.patch(path, json={"quantity": 12}).status_code == 200
-    assert client.post("/orders", json=ORDER_BODY).status_code == 201
+    assert outbound_client.post("/orders", json=ORDER_BODY).status_code == 201
 
 
-def test_known_duplicate_uuid_is_409_and_preserves_existing_order(client, monkeypatch):
+def test_known_duplicate_uuid_is_409_and_preserves_existing_order(outbound_client, monkeypatch):
+    client = outbound_client
     first = client.post("/orders", json=ORDER_BODY).json()
     with monkeypatch.context() as patch:
         patch.setattr("app.repositories.Order", lambda **body: Order(id=UUID(first["id"]), **body))
@@ -224,9 +232,9 @@ def test_concurrent_reservations_across_app_instances(app_factory):
         assert first.get("/stocks").json()[0]["reservations"] == [{**RESERVATION, "quantity": 7}]
 
 
-def test_database_ownership(client):
+def test_database_ownership(client, outbound_client):
     assert inspect(client.app.state.engine).get_table_names() == ["receipts", "stocks"]
-    assert inspect(client.app.state.outbound_engine).get_table_names() == ["orders"]
+    assert inspect(outbound_client.app.state.engine).get_table_names() == ["orders"]
     with client.app.state.engine.connect() as connection:
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
 
@@ -242,14 +250,16 @@ def test_corrupt_cache_is_rebuilt_from_database(client, payload):
     assert client.get(path).headers["X-Cache"] == "HIT"
 
 
-def test_ready_degraded_when_cache_down(client):
-    assert client.get("/ready").json()["status"] == "ok"
-    client.app.state.redis.down = True
-    response = client.get("/ready")
-    assert response.status_code == 200
-    assert response.json() == {"service": "warehouse", "status": "degraded",
-                               "database": {"inventory": "ok", "outbound": "ok"}, "cache": "down"}
-    assert client.get("/health").json() == {"status": "ok", "service": "replace-me"}
+@pytest.mark.parametrize("service", ["inventory", "outbound"])
+def test_ready_degraded_when_cache_down(app_factory, service):
+    with TestClient(app_factory(service=service)) as client:
+        assert client.get("/ready").json()["status"] == "ok"
+        client.app.state.redis.down = True
+        response = client.get("/ready")
+        assert response.status_code == 200
+        assert response.json() == {"service": service, "status": "degraded",
+                                   "database": {service: "ok"}, "cache": "down"}
+        assert client.get("/health").json() == {"status": "ok", "service": service}
 
 
 def test_database_outage_returns_503(client, monkeypatch):
@@ -262,7 +272,7 @@ def test_database_outage_returns_503(client, monkeypatch):
     monkeypatch.setattr(client.app.state.engine, "connect", unavailable)
     response = client.get("/ready")
     assert response.status_code == 503
-    assert response.json()["database"] == {"inventory": "down", "outbound": "ok"}
+    assert response.json()["database"] == {"inventory": "down"}
     assert client.post(path + "/reservations", json=RESERVATION).status_code == 503
     assert client.get("/stocks").status_code == 503
     assert client.get(path).headers["X-Cache"] == "HIT"

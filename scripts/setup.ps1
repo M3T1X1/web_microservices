@@ -5,7 +5,9 @@ param(
     [ValidateRange(1, 65535)]
     [int]$Port = 8101,
     [switch]$Test,
-    [switch]$SetupOnly
+    [switch]$SetupOnly,
+    [ValidateSet("inventory", "outbound")]
+    [string]$Service = "inventory"
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,23 +27,31 @@ function Invoke-Python {
 
 Push-Location $projectDir
 try {
-    $pythonCommand = $null
-    $pythonArguments = @()
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        $pythonCommand = "py"
-        $pythonArguments = @("-3")
+    if ($Service -eq "outbound" -and -not $PSBoundParameters.ContainsKey("Port")) {
+        $Port = 8102
     }
-    elseif (Get-Command python -ErrorAction SilentlyContinue) {
-        $pythonCommand = "python"
+    $appModule = "app.main:app"
+    if ($Service -eq "outbound") {
+        $appModule = "app.outbound:app"
     }
-    else {
-        throw "Zainstaluj Python 3.12 lub nowszy z python.org (z pip i launcherem py), a potem otworz nowy terminal."
-    }
-
-    $versionCheck = 'import sys; sys.exit(sys.version_info < (3, 12))'
-    Invoke-Python -Executable $pythonCommand -PythonArguments ($pythonArguments + @("-c", $versionCheck))
 
     if (-not (Test-Path ".venv")) {
+        $pythonCommand = $null
+        $pythonArguments = @()
+        if (Get-Command py -ErrorAction SilentlyContinue) {
+            $pythonCommand = "py"
+            $pythonArguments = @("-3")
+        }
+        elseif (Get-Command python -ErrorAction SilentlyContinue) {
+            $pythonCommand = "python"
+        }
+        else {
+            throw "Zainstaluj Python 3.12 lub nowszy z python.org (z pip i launcherem py), a potem otworz nowy terminal."
+        }
+
+        $versionCheck = 'import sys; sys.exit(sys.version_info < (3, 12))'
+        Invoke-Python -Executable $pythonCommand -PythonArguments ($pythonArguments + @("-c", $versionCheck))
+
         Invoke-Python -Executable $pythonCommand -PythonArguments ($pythonArguments + @("-m", "venv", ".venv"))
     }
 
@@ -58,11 +68,15 @@ try {
     }
 
     if ($SetupOnly) {
-        Write-Host "Instalacja zakonczona. Aby uruchomic serwer: .\scripts\setup.ps1"
+        Write-Host "Instalacja zakonczona. Aby uruchomic serwer: .\scripts\setup.ps1 -Service $Service"
     }
     else {
-        Write-Host "Dokumentacja: http://127.0.0.1:$Port/docs | Zatrzymanie: Ctrl+C"
-        Invoke-Python -Executable $venvPython -PythonArguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$Port")
+        $serverArguments = @("-m", "uvicorn", $appModule, "--host", "127.0.0.1", "--port", "$Port")
+        if (Test-Path ".env") {
+            $serverArguments += @("--env-file", ".env")
+        }
+        Write-Host "$Service | Dokumentacja: http://127.0.0.1:$Port/docs | Zatrzymanie: Ctrl+C"
+        Invoke-Python -Executable $venvPython -PythonArguments $serverArguments
     }
 }
 catch {

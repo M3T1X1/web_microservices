@@ -2,15 +2,24 @@
 set -euo pipefail
 
 usage() {
-    echo "Uzycie: bash scripts/setup.sh [--port 8101] [--test] [--setup-only]"
+    echo "Uzycie: bash scripts/setup.sh [--service inventory|outbound] [--port PORT] [--test] [--setup-only]"
 }
 
-port=8101
+service=inventory
+port=""
 run_tests=false
 setup_only=false
 
 while (($#)); do
     case "$1" in
+        --service)
+            if (($# < 2)); then
+                usage >&2
+                exit 1
+            fi
+            service="$2"
+            shift 2
+            ;;
         --port)
             if (($# < 2)); then
                 usage >&2
@@ -25,6 +34,21 @@ while (($#)); do
         *) echo "Nieznany argument: $1" >&2; usage >&2; exit 1 ;;
     esac
 done
+
+case "$service" in
+    inventory)
+        app_module=app.main:app
+        port="${port:-8101}"
+        ;;
+    outbound)
+        app_module=app.outbound:app
+        port="${port:-8102}"
+        ;;
+    *)
+        echo "Usluga musi byc inventory albo outbound." >&2
+        exit 1
+        ;;
+esac
 
 if [[ ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || ((port > 65535)); then
     echo "Port musi byc liczba od 1 do 65535." >&2
@@ -65,9 +89,13 @@ if "$run_tests"; then
 fi
 
 if "$setup_only"; then
-    echo "Instalacja zakonczona. Aby uruchomic serwer: bash scripts/setup.sh"
+    echo "Instalacja zakonczona. Aby uruchomic serwer: bash scripts/setup.sh --service $service"
     exit 0
 fi
 
-echo "Dokumentacja: http://127.0.0.1:$port/docs | Zatrzymanie: Ctrl+C"
-exec "$venv_python" -m uvicorn app.main:app --host 127.0.0.1 --port "$port"
+env_arguments=()
+if [[ -f .env ]]; then
+    env_arguments=(--env-file .env)
+fi
+echo "$service | Dokumentacja: http://127.0.0.1:$port/docs | Zatrzymanie: Ctrl+C"
+exec "$venv_python" -m uvicorn "$app_module" --host 127.0.0.1 --port "$port" "${env_arguments[@]}"

@@ -1,6 +1,6 @@
 # System magazynowy — Inventory, Outbound, Shipping i Auth
 
-Docelowo system obejmuje cztery mikrousługi: Inventory, Outbound, Shipping i Auth. **Zaimplementowane są Inventory i Outbound**; Shipping i Auth pozostają planowane. Inventory odpowiada za stany, rezerwacje i przyjęcia towaru. **Inbound jest modułem Inventory**, korzysta z tej samej bazy i transakcji. Outbound odpowiada za zamówienia, Shipping będzie obsługiwać wysyłkę, a Auth — konta, logowanie i role. Inventory i Outbound działają obecnie w jednym procesie FastAPI, z osobnymi bazami SQLite i opcjonalnym cache Redis.
+Docelowo system obejmuje cztery mikrousługi: Inventory, Outbound, Shipping i Auth. **Zaimplementowane są Inventory i Outbound**. Inventory odpowiada za stany, rezerwacje i przyjęcia towaru. **Inbound jest modułem Inventory**, korzysta z tej samej bazy i transakcji. Outbound odpowiada za zamówienia. Inventory i Outbound działają jako osobne aplikacje FastAPI i osobne procesy, z własnymi bazami SQLite i klientami Redis. Wspólny serwer Redis rozdziela dane przez prefiksy `inventory` i `outbound`.
 
 ## Uruchomienie i testy
 
@@ -11,30 +11,41 @@ Wymagania: Python 3.12 lub nowszy i internet do pobrania zależności. Skopiuj p
 Zainstaluj Python 3.12 lub nowszy z [python.org](https://www.python.org/downloads/windows/), wraz z pip i launcherem `py`, i otwórz nowy PowerShell.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -Service inventory
 ```
 
 `Bypass` dotyczy tylko uruchamianego procesu i nie zmienia trwale polityki PowerShell.
+
+W drugim terminalu uruchom Outbound.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -Service outbound
+```
+
+Opcjonalny Redis jest uruchamiany osobno przez `docker compose up -d redis` z katalogu projektu.
 
 ### Debian 13
 
 ```bash
 sudo apt update
 sudo apt install python3 python3-venv
-bash scripts/setup.sh
+bash scripts/setup.sh --service inventory
 ```
 
-Skrypty tworzą lokalne `.venv`, instalują `requirements.txt` i uruchamiają aplikację bez `--reload`. Ponowne uruchomienie korzysta z istniejącego środowiska. Nie trzeba go aktywować. Przeniesione lub uszkodzone `.venv` należy usunąć i odtworzyć skryptem.
+W drugim terminalu uruchom `bash scripts/setup.sh --service outbound`.
+
+Skrypty tworzą lokalne `.venv`, instalują `requirements.txt` i uruchamiają wybraną aplikację bez `--reload`. Wczytują `.env`, jeśli plik istnieje. Ponowne uruchomienie korzysta z istniejącego środowiska. Przeniesione lub uszkodzone `.venv` należy odtworzyć skryptem.
 
 | Opcja | Windows | Debian |
 |---|---|---|
 | Samo przygotowanie środowiska | `-SetupOnly` | `--setup-only` |
 | Testy przed uruchomieniem | `-Test` | `--test` |
 | Inny port | `-Port 8200` | `--port 8200` |
+| Wybór usługi | `-Service inventory` lub `-Service outbound` | `--service inventory` lub `--service outbound` |
 
 Opcje można łączyć, np. `bash scripts/setup.sh --setup-only --test`. Na Windows dopisz je po ścieżce do skryptu, np. `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -SetupOnly -Test`. Błąd instalacji lub testów przerywa uruchamianie.
 
-Domyślnie API działa pod `http://127.0.0.1:8101`, status pod `/health`, a dokumentacja pod `/docs`. Serwer jest dostępny lokalnie; zatrzymanie: `Ctrl+C`.
+Domyślna usługa to Inventory na `http://127.0.0.1:8101`. Outbound działa na `http://127.0.0.1:8102`. Każda aplikacja udostępnia własne `/health`, `/ready` i `/docs`. Proces zatrzymasz przez `Ctrl+C` w jego terminalu.
 
 Uruchomienie obejmuje tylko Inventory i Outbound. Shipping i Auth nie mają jeszcze kodu, baz ani osobnych procesów; obecne endpointy nie wymagają logowania.
 
@@ -44,16 +55,24 @@ Uruchomienie obejmuje tylko Inventory i Outbound. Shipping i Auth nie mają jesz
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8101
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --env-file .env --host 127.0.0.1 --port 8101
 ```
 
-W drugim terminalu: `Invoke-RestMethod http://localhost:8101/health`. Dokumentacja: [Swagger UI](http://localhost:8101/docs). Zatrzymanie serwera: `Ctrl+C`. Nie trzeba aktywować środowiska. Zmień `replace-me` w aplikacji i teście na nazwę usługi.
+W drugim terminalu, z tego samego katalogu projektu, uruchom Outbound.
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.outbound:app --env-file .env --host 127.0.0.1 --port 8102
+```
+
+Plik `.env` utwórz na podstawie `.env.example`, jeśli jeszcze go nie masz. Dokumentacja Inventory jest pod [8101/docs](http://127.0.0.1:8101/docs), a Outbound pod [8102/docs](http://127.0.0.1:8102/docs). Inventory obsługuje `/stocks` i `/receipts`, a Outbound `/orders`. `/health` identyfikuje usługę jako `inventory` albo `outbound`, a `/ready` sprawdza jej bazę oraz cache.
 
 ## Struktura kodu
 
 Poniższe pliki dotyczą zaimplementowanych domen Inventory i Outbound. Pliki Shipping i Auth powstaną w kolejnym etapie.
 
-- `app/main.py` — inicjalizacja baz, serwisów i rejestracja routerów.
+- `app/main.py` — fabryka `create_app()` i aplikacja Inventory, baza stanów i przyjęć oraz ich routery.
+- `app/outbound.py` — własna fabryka `create_app()` i aplikacja Outbound, baza zamówień i router zamówień.
+- `app/application.py` — wspólna obsługa `/health`, `/ready` i błędów bazy dla obu aplikacji.
 - `app/models/order.py` — modele zamówień i walidacja danych.
 - `app/models/stock.py` — model stanu i walidacja rezerwacji.
 - `app/models/receipt.py` — modele przyjęcia i pozycji dostawy.
@@ -63,7 +82,7 @@ Poniższe pliki dotyczą zaimplementowanych domen Inventory i Outbound. Pliki Sh
 - `app/services/receipts.py` — operacje przyjęć i unieważnianie cache zmienionych stanów po księgowaniu.
 - `app/repositories.py` — transakcje, reguły biznesowe i zapis obu domen; przyjęcia należą do Inventory.
 - `app/db_models.py` — tabele `stocks`, `receipts` i `orders`.
-- `tests/conftest.py` — wspólny klient ze świeżą aplikacją dla każdego testu.
+- `tests/conftest.py` — niezależne aplikacje i klienci obu usług z tymczasowymi bazami i atrapami Redis.
 - `tests/test_*.py` — scenariusze health, Inventory i Outbound.
 
 ## 1. Problem i granice
@@ -132,7 +151,7 @@ Kontrakt API:
 
 Przykłady (`{id}` oznacza UUID):
 
-- `GET /health` → `200`, `{"status":"ok","service":"replace-me"}`.
+- `GET /health` w Inventory → `200`, `{"status":"ok","service":"inventory"}`. Outbound zwraca `service: "outbound"`.
 - `GET /stocks` przy pustym magazynie → `200`, `[]`.
 - `GET /stocks/{id}` dla istniejącego stanu → `200`, `{"id":"11111111-1111-4111-8111-111111111111","sku":"SKU-001","location":"A-01","quantity":10,"reservations":[]}`.
 - `POST /stocks/{id}/reservations`, JSON `{"order_id":"22222222-2222-4222-8222-222222222222","quantity":3}` → `201` z takim samym JSON-em utworzonej rezerwacji.
@@ -231,7 +250,7 @@ Mikrousługi (każda usługa = osobny proces i własna baza):
 3. Podział daje niezależne wdrażanie, ale dodaje opóźnienia sieci i awarie zależności; brak Inventory blokuje rezerwacje, a brak Auth nowe logowania.
 4. Modularny monolit — prostsze wdrażanie i utrzymanie przy małej skali.
 
-Schematy pokazują docelowy system czterech usług. Obecnie działają tylko Inventory i Outbound w jednym procesie; Shipping i Auth nie są zaimplementowane.
+Schematy pokazują docelowy system czterech usług. Inventory i Outbound mają osobne aplikacje i procesy. Integracja HTTP między nimi jest kolejnym etapem.
 
 ## 6. Dokumentacja wykorzystana podczas pracy
 
@@ -425,7 +444,7 @@ Paczkomat z `demo.py` służył wyłącznie do zrozumienia mechanizmu repozytori
 
 Własne rozszerzenia względem paczki: modele ORM magazynu, repozytoria obu domen, walidacja schematu i UUID kopii w `cached_read()`, HTTP i `X-Cache`, `lifespan`, dwie osobne bazy, blokada zapisu SQLite przed sprawdzeniem reguły, korekta ilości, gotowość `/ready` i testy API. W przeciwieństwie do demonstracyjnego `create()` nie mapujemy wszystkich `IntegrityError` na konflikt — tylko rozpoznaną kolizję UUID zamówienia. Pozostałe awarie bazy dają 503.
 
-Zachowano fabrykę `create_app()`, dotychczasowe metody i ścieżki HTTP, format UUID, JSON, walidację, błędy 404/409/422 oraz reguły rezerwacji i pakowania. Zmieniono magazyn w pamięci na SQLite dla **Inventory i Outbound**. Dodano `PATCH /stocks/{id}` do korekty ilości, `X-Cache` na odczytach szczegółów oraz opcjonalny `/ready`. Nazwa `replace-me` w `/health` pozostaje zgodna z kontraktem LAB1.
+Zachowano fabryki `create_app()`, metody i ścieżki domenowe HTTP, format UUID, JSON, walidację, błędy 404/409/422 oraz reguły rezerwacji i pakowania. Zmieniono magazyn w pamięci na SQLite dla **Inventory i Outbound**. Dodano `PATCH /stocks/{id}`, `X-Cache` i `/ready`. Po rozdzieleniu aplikacji `/health` zwraca nazwę swojej usługi, a `/ready` stan jej własnej bazy. Żądania zamówień kierujemy na port Outbound.
 
 ### Dane, właściciel i transakcje
 
@@ -441,7 +460,7 @@ Tabela opisuje obecne bazy. Planowany Auth będzie właścicielem `auth.db` i ta
 
 Baza chroni klucz główny, `NOT NULL`, nieujemną ilość, dozwolone statusy oraz unikalną parę SKU–lokalizacja. Pydantic pilnuje tekstów, UUID i ścisłych typów ilości. `order_id` w rezerwacji jest odwołaniem do obcej domeny bez FK między bazami; Inventory nie kopiuje danych odbiorcy ani statusu zamówienia. Outbound nie zapisuje cudzych stanów magazynowych.
 
-`app/main.py` tworzy brakujące tabele przez `Base.metadata.create_all()`. Przy tworzeniu nowej tabeli `stocks` powstaje też indeks `uq_stocks_sku_location`, zadeklarowany w `app/db_models.py`. Nie ma automatycznej migracji istniejących tabel ani dodawania do nich nowych indeksów. Podczas developmentu po zmianie struktury odtwarzamy lokalne bazy od zera; zwykły restart bez usuwania plików zachowuje dane.
+`app/main.py` tworzy brakujące tabele Inventory przez `Base.metadata.create_all()`, a `app/outbound.py` tworzy tabelę `orders` we własnej bazie. Przy tworzeniu nowej tabeli `stocks` powstaje też indeks `uq_stocks_sku_location`, zadeklarowany w `app/db_models.py`. Nie ma automatycznej migracji istniejących tabel ani dodawania do nich nowych indeksów. Rozdzielenie aplikacji korzysta z istniejących plików baz i kluczy cache.
 
 Przyjęcie i wszystkie jego pozycje są księgowane w jednej transakcji `BEGIN IMMEDIATE`: istniejące stany są zwiększane, brakujące tworzone, a przyjęcie otrzymuje `POSTED`. Nie zmieniamy rezerwacji. Powtórzone pozycje tej samej pary SKU–lokalizacja są sumowane. Błąd cofa również wcześniejsze zmiany pozycji tej dostawy. Równoczesne próby zaksięgowania tego samego przyjęcia dają jeden sukces i jeden konflikt; nie podwajają dostawy.
 
@@ -487,7 +506,7 @@ docker compose exec redis redis-cli PING
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -Test
 ```
 
-Skrypty setup zachowują opcje opisane na początku README. API działa pod `http://127.0.0.1:8101`, Swagger pod `/docs`. Zatrzymanie: `Ctrl+C`. Do demonstracji restartów uruchamiaj bez `--reload`.
+Skrypty setup obsługują wybór usługi opisany na początku README. Inventory działa na `8101`, Outbound na `8102`. Obie aplikacje uruchamiaj w osobnych terminalach. Do demonstracji restartów uruchamiaj bez `--reload`.
 
 | Zmienna | Domyślnie | Znaczenie |
 |---|---|---|
@@ -497,7 +516,7 @@ Skrypty setup zachowują opcje opisane na początku README. API działa pod `htt
 | `CACHE_PREFIX` | `lab2:local:warehouse` | Własna przestrzeń kluczy; ustaw numer albumu |
 | `CACHE_TTL_SECONDS` | `60` | Dodatni czas życia kopii w sekundach |
 
-Ścieżki SQLite są względne do katalogu uruchomienia. Skrypty setup przechodzą do katalogu projektu. Używaj dwóch różnych plików baz. Nowy zbiór baz powinien mieć nowy prefiks Redis, aby nie odczytać kopii poprzedniego zbioru. `.env.example` jest wzorem konfiguracji — aplikacja nie wczytuje go automatycznie. Po zmianie zmiennych środowiska zatrzymaj i uruchom Uvicorn ponownie; samo `--reload` nie przejmuje środowiska terminala.
+Ścieżki SQLite są względne do katalogu uruchomienia. Skrypty setup przechodzą do katalogu projektu i przekazują `.env` do Uvicorna. Przy ręcznym uruchomieniu użyj `--env-file .env`. Inventory czyta `DATABASE_URL`, Outbound `OUTBOUND_DATABASE_URL`. Używaj dwóch różnych plików baz. Nowy zbiór baz powinien mieć nowy prefiks Redis. Po zmianie konfiguracji uruchom proces ponownie. Zmienne już ustawione w terminalu mają pierwszeństwo przed `.env`.
 
 Brakujące pliki baz i tabele tworzy `main.py` przy starcie, razem z indeksami nowych tabel. `create_all()` nie aktualizuje struktury istniejących tabel; po zmianie modeli bazy odtwarzamy w czasie developmentu. `.gitignore` wyklucza lokalne bazy, pliki pomocnicze SQLite i `.env`. Compose udostępnia Redis 7 tylko na `127.0.0.1:6379`; cache jest odtwarzalny, bez zapisu na dysku.
 
@@ -505,7 +524,7 @@ Brakujące pliki baz i tabele tworzy `main.py` przy starcie, razem z indeksami n
 
 | Metoda | Ścieżka | Sukces | Błędy |
 |---|---|---|---|
-| GET | `/health` | `200`, dokładny JSON z LAB1 | Sprawdza tylko życie procesu |
+| GET | `/health` | `200`, status `ok` i nazwa swojej usługi | Sprawdza tylko życie procesu |
 | GET | `/ready` | `200`, status `ok` albo `degraded` bez Redis | `503` przy niedostępnej bazie |
 | GET | `/stocks` | `200`, lista stanów z bazy | `503` przy awarii bazy |
 | GET | `/stocks/{id}` | `200`, `Stock` i `X-Cache` | `404`, `422`, `503` |
@@ -526,7 +545,7 @@ Przykład `POST /orders`:
 {"recipient_name":"Jan Kowalski","recipient_phone":"123456789","recipient_address":"ul. Polna 1, Warszawa","items":[{"sku":"SKU-001","quantity":3}]}
 ```
 
-Odpowiedź zawiera te same pola oraz serwerowy UUID `id` i `status: "NEW"`. `/ready` zwraca osobny stan baz `inventory` i `outbound` oraz cache. Sam `SELECT 1` potwierdza połączenie, ale nie poprawność całego schematu ani możliwość każdego zapisu. Awaria inicjalizacji bazy uniemożliwia start aplikacji.
+Odpowiedź zawiera te same pola oraz serwerowy UUID `id` i `status: "NEW"`. `/ready` każdej aplikacji zwraca stan wyłącznie jej własnej bazy oraz klienta cache. Sam `SELECT 1` potwierdza połączenie, ale nie poprawność całego schematu ani możliwość każdego zapisu. Awaria inicjalizacji bazy uniemożliwia start jej aplikacji.
 
 ### Cache, TTL i awarie
 
@@ -547,14 +566,16 @@ Nieudane unieważnienie może pozostawić stary wpis do końca TTL, także po pr
 
 ### Testy i dowody LAB2
 
-LAB1: **22 passed**; LAB2 przed włączeniem przyjęć: **50 passed**. Aktualnie: **73 passed**, w tym 23 przypadki dla przyjęć i tworzenia nowej bazy. Testy automatyczne uruchomiono poleceniem:
+LAB1 obejmował **22 passed**, LAB2 przed włączeniem przyjęć **50 passed**, a po dodaniu przyjęć **73 passed**. Po rozdzieleniu aplikacji przechodzi **81 testów**. Testy automatyczne uruchomiono poleceniem:
 
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/python -m pip check
 ```
 
-Na Windows użyj `.\.venv\Scripts\python.exe`. Każdy test ma własne `tmp_path`, dwie bazy, prefiks i atrapę Redis zbudowaną na klasie z ZIP-a. Nowa instancja aplikacji z tą samą bazą zachowuje stan; sama fabryka nie resetuje już danych. `TestClient` w bloku `with` uruchamia i zamyka `lifespan`.
+Na Windows użyj `.\.venv\Scripts\python.exe`. Testy korzystają z `tmp_path` i osobnych aplikacji z własnymi bazami oraz atrapami Redis. Nowa instancja aplikacji z tą samą bazą zachowuje stan. `TestClient` w bloku `with` uruchamia i zamyka `lifespan`.
+
+`tests/test_services.py` sprawdza rozdzielenie routerów, start bez bazy drugiej usługi, niezależność gotowości podczas awarii jednej bazy oraz działanie Outbound po zamknięciu Inventory.
 
 Cztery wymagane grupy własnych testów:
 
@@ -606,7 +627,7 @@ Reset podczas developmentu: zatrzymaj aplikację, usuń lokalne pliki `inventory
 
 Dla klienta dotychczasowe API i błędy są zachowane, a zapis przestał znikać po restarcie; doszły nagłówki cache, korekta ilości, gotowość oraz moduł przyjęć Inventory. Wewnątrz zmieniono słowniki na repozytoria, sesje i transakcje oraz dodano opcjonalny cache.
 
-Inventory i Outbound nadal działają w jednym procesie FastAPI. Dodanie bazy i Redis samo nie tworzy systemu niezależnych mikrousług. Osobne bazy i odpowiedzialności przygotowują przyszłe wydzielenie procesów i integrację HTTP. Druga usługa powinna zmieniać cudze dane przez API, bez bezpośredniego zapisu do jej tabel.
+Inventory i Outbound działają w osobnych procesach FastAPI. Każda aplikacja otwiera wyłącznie własną bazę i tworzy własnego klienta Redis. Awaria bazy jednej usługi nie wpływa na start ani gotowość drugiej. Wspólny kod modeli i repozytoriów jest używany przez obie aplikacje. Komunikacja między nimi będzie realizowana przez API.
 
 Docelowo dołączą Shipping i Auth jako trzecia i czwarta usługa. Obecne testy, raporty i konfiguracja uruchomienia dotyczą wyłącznie zaimplementowanych Inventory i Outbound; nie potwierdzają działania planowanego logowania ani wysyłki.
 

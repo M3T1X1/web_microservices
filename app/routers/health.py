@@ -1,9 +1,9 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 
 router = APIRouter()
 
 
 @router.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "service": "replace-me"}
+def health(request: Request) -> dict[str, str]:
+    return {"status": "ok", "service": request.app.state.service_name}
