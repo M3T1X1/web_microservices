@@ -82,6 +82,16 @@ W drugim terminalu, z tego samego katalogu projektu, uruchom Outbound.
 
 Plik `.env` utwórz na podstawie `.env.example`, jeśli jeszcze go nie masz. Dokumentacja Inventory jest pod [8101/docs](http://127.0.0.1:8101/docs), a Outbound pod [8102/docs](http://127.0.0.1:8102/docs). Inventory obsługuje `/stocks` i `/receipts`, a Outbound `/orders`. `/health` identyfikuje usługę jako `inventory` albo `outbound`, a `/ready` sprawdza jej bazę oraz cache.
 
+Obie aplikacje rejestrują się w Eurece przy starcie przez `py-eureka-client==0.13.3`. Uruchom najpierw serwer Eureka, a następnie Inventory i Outbound w osobnych terminalach powyższymi komendami. W panelu powinny pojawić się `INVENTORY-SERVICE` na `8101` oraz `OUTBOUND-SERVICE` na `8102`, obie ze statusem `UP`.
+
+Wspólny plik `.env` zawiera `EUREKA_SERVER_URL=http://127.0.0.1:8761`, `INSTANCE_HOST=127.0.0.1` i `INSTANCE_IP=127.0.0.1`. Nazwy i porty mają osobne zmienne `INVENTORY_SERVICE_NAME`, `INVENTORY_SERVICE_PORT`, `OUTBOUND_SERVICE_NAME` oraz `OUTBOUND_SERVICE_PORT`. Adres serwera jest podawany bez końcowego `/eureka`, a klient używa `eureka_context="/eureka"`.
+
+Przy ręcznym uruchamianiu port `--port` musi odpowiadać zmiennej portu danej usługi. Skrypty startowe przekazują faktyczny port Uvicorna także do klienta Eureki, w tym po użyciu `-Port` albo `--port`.
+
+Cykl życia aplikacji przygotowuje bazę i Redis, uruchamia klienta Eureki, a przy zamykaniu zatrzymuje klienta przed zwolnieniem zasobów bazy i cache. Klient wysyła heartbeat co 30 sekund. Wpis `UP` potwierdza rejestrację instancji. Endpoint `/ready` pokazuje stan jej bazy i Redis, a `/health` stan procesu. Przy zamykaniu przez `Ctrl+C` klient wysyła wyrejestrowanie. Panel i API mogą pokazać zmianę po odświeżeniu cache rejestru. Po nagłym przerwaniu procesu wpis może pozostać w rejestrze przez pewien czas.
+
+Testy wstrzykują atrapę przez `create_app(eureka_client=...)`. Testy rejestracji są w `tests/test_eureka.py`, a zwykły zestaw `pytest` działa bez połączenia z prawdziwym rejestrem.
+
 ## Struktura kodu
 
 Poniższe pliki dotyczą zaimplementowanych domen Inventory i Outbound. Pliki Shipping i Auth powstaną w kolejnym etapie.
@@ -89,6 +99,7 @@ Poniższe pliki dotyczą zaimplementowanych domen Inventory i Outbound. Pliki Sh
 - `app/main.py` — fabryka `create_app()` i aplikacja Inventory, baza stanów i przyjęć oraz ich routery.
 - `app/outbound.py` — własna fabryka `create_app()` i aplikacja Outbound, baza zamówień i router zamówień.
 - `app/application.py` — wspólna obsługa `/health`, `/ready` i błędów bazy dla obu aplikacji.
+- `app/eureka.py` — konfiguracja osobnego klienta Eureki dla każdej aplikacji. `app/application.py` łączy jego start i stop z cyklem życia zasobów SQLite i Redis.
 - `app/models/order.py` — modele zamówień i walidacja danych.
 - `app/models/stock.py` — model stanu i walidacja rezerwacji.
 - `app/models/receipt.py` — modele przyjęcia i pozycji dostawy.
@@ -582,7 +593,7 @@ Nieudane unieważnienie może pozostawić stary wpis do końca TTL, także po pr
 
 ### Testy i dowody LAB2
 
-LAB1 obejmował **22 passed**, LAB2 przed włączeniem przyjęć **50 passed**, a po dodaniu przyjęć **73 passed**. Po rozdzieleniu aplikacji przechodzi **81 testów**. Testy automatyczne uruchomiono poleceniem:
+LAB1 obejmował **22 passed**, LAB2 przed włączeniem przyjęć **50 passed**, a po dodaniu przyjęć **73 passed**. Po rozdzieleniu aplikacji przechodziło **81 testów**. Po dodaniu rejestracji w Eurece przechodzi **87 testów**. Testy automatyczne uruchomiono poleceniem:
 
 ```bash
 .venv/bin/python -m pytest -q

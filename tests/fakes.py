@@ -2,6 +2,17 @@
 from redis.exceptions import ConnectionError
 
 
+class FakeEurekaClient:
+    def __init__(self):
+        self.events = []
+
+    async def start(self):
+        self.events.append("start")
+
+    async def stop(self):
+        self.events.append("stop")
+
+
 class MemoryRedis:
     """Test double only; does not replace the real Redis exercise."""
     def __init__(self):

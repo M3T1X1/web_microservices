@@ -12,6 +12,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectDir = Split-Path -Parent $PSScriptRoot
+$servicePortVariable = $Service.ToUpperInvariant() + "_SERVICE_PORT"
+$previousServicePort = [Environment]::GetEnvironmentVariable($servicePortVariable, "Process")
 
 # PowerShell 5.1 nie przerywa skryptu po bledzie programu zewnetrznego.
 function Invoke-Python {
@@ -71,6 +73,7 @@ try {
         Write-Host "Instalacja zakonczona. Aby uruchomic serwer: .\scripts\setup.ps1 -Service $Service"
     }
     else {
+        [Environment]::SetEnvironmentVariable($servicePortVariable, "$Port", "Process")
         $serverArguments = @("-m", "uvicorn", $appModule, "--host", "127.0.0.1", "--port", "$Port")
         if (Test-Path ".env") {
             $serverArguments += @("--env-file", ".env")
@@ -84,5 +87,6 @@ catch {
     exit 1
 }
 finally {
+    [Environment]::SetEnvironmentVariable($servicePortVariable, $previousServicePort, "Process")
     Pop-Location
 }

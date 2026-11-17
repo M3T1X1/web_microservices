@@ -98,4 +98,4 @@ if [[ -f .env ]]; then
     env_arguments=(--env-file .env)
 fi
 echo "$service | Dokumentacja: http://127.0.0.1:$port/docs | Zatrzymanie: Ctrl+C"
-exec "$venv_python" -m uvicorn "$app_module" --host 127.0.0.1 --port "$port" "${env_arguments[@]}"
+exec env "${service^^}_SERVICE_PORT=$port" "$venv_python" -m uvicorn "$app_module" --host 127.0.0.1 --port "$port" "${env_arguments[@]}"

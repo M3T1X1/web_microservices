@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.outbound import create_app as create_outbound_app
-from tests.fakes import ControlledRedis
+from tests.fakes import ControlledRedis, FakeEurekaClient
 
 
 @pytest.fixture
@@ -12,6 +12,7 @@ def app_factory(tmp_path):
         options = {
             "database_url": "sqlite:///" + (tmp_path / f"{service}.db").as_posix(),
             "redis_client": ControlledRedis(),
+            "eureka_client": FakeEurekaClient(),
             "cache_prefix": f"lab2:test:{tmp_path.name}:warehouse",
             "cache_ttl": 60,
         }

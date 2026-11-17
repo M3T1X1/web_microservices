@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
@@ -7,7 +9,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.routers import health
 
 
-def create_service_app(service_name, description, lifespan) -> FastAPI:
+def create_service_app(service_name, description, storage_lifespan, eureka_client) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app):
+        async with storage_lifespan(app):
+            app.state.eureka_client = eureka_client
+            try:
+                await eureka_client.start()
+                yield
+            finally:
+                await eureka_client.stop()
+
     app = FastAPI(title=f"Magazyn — {service_name.title()}", version="0.4.0",
                   description=description, lifespan=lifespan)
     app.state.service_name = service_name
@@ -37,3 +49,4 @@ def create_service_app(service_name, description, lifespan) -> FastAPI:
         })
 
     return app
+

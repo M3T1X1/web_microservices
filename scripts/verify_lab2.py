@@ -97,6 +97,8 @@ def verify(baseline_dir=None):
         environment = {**os.environ,
             "DATABASE_URL": "sqlite:///" + (temporary / "inventory.db").as_posix(),
             "OUTBOUND_DATABASE_URL": "sqlite:///" + (temporary / "outbound.db").as_posix(),
+            "INVENTORY_SERVICE_NAME": f"VERIFY-INVENTORY-{temporary.name.upper()}",
+            "OUTBOUND_SERVICE_NAME": f"VERIFY-OUTBOUND-{temporary.name.upper()}",
             "REDIS_URL": redis_url, "CACHE_PREFIX": prefix, "CACHE_TTL_SECONDS": "2"}
         with (temporary / "processes.log").open("w+") as log, httpx.Client(
                 base_url=f"http://127.0.0.1:{api_port}", timeout=5, trust_env=False) as api, httpx.Client(
@@ -109,7 +111,8 @@ def verify(baseline_dir=None):
                 }[service]
                 servers[service] = subprocess.Popen([sys.executable, "-m", "uvicorn", module,
                     "--host", "127.0.0.1", "--port", str(port)], cwd=source_dir,
-                    env={**environment, "REDIS_URL": url, "CACHE_TTL_SECONDS": str(ttl)},
+                    env={**environment, "REDIS_URL": url, "CACHE_TTL_SECONDS": str(ttl),
+                         f"{service.upper()}_SERVICE_PORT": str(port)},
                     stdout=log, stderr=log)
                 wait_until(lambda: client.get("/health").status_code == 200, servers[service], service)
 
