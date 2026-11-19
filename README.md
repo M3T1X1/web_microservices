@@ -1,8 +1,8 @@
 # System magazynowy — Inventory, Outbound, Shipping i Auth
 
-Docelowo system obejmuje cztery mikrousługi: Inventory, Outbound, Shipping i Auth. **Zaimplementowane są Inventory i Outbound**; Shipping i Auth pozostają planowane. Inventory odpowiada za stany, rezerwacje i przyjęcia towaru. **Inbound jest modułem Inventory**, korzysta z tej samej bazy i transakcji. Outbound odpowiada za zamówienia, Shipping będzie obsługiwać wysyłkę, a Auth — konta, logowanie i role. Inventory i Outbound działają obecnie w jednym procesie FastAPI, z osobnymi bazami SQLite i opcjonalnym cache Redis.
+Docelowo system obejmuje cztery mikrousługi: Inventory, Outbound, Shipping i Auth. **Zaimplementowane są Inventory i Outbound**; Shipping i Auth pozostają planowane. Inventory odpowiada za stany, rezerwacje i przyjęcia towaru. **Inbound jest modułem Inventory**, korzysta z tej samej bazy i transakcji. Outbound odpowiada za zamówienia, Shipping będzie obsługiwać wysyłkę, a Auth — konta, logowanie i role. W aktualnym LAB4 Inventory i Outbound działają jako osobne procesy FastAPI (:8101 i :8102), z własnymi bazami SQLite, cache Redis, rejestrem Eureka (:8761) i bramką Spring Cloud Gateway (:8080). [Aktualna instrukcja LAB4](#etap-lab4--bramka-api-i-dwie-niezależne-usługi) znajduje się na końcu dokumentacji; wcześniejsze sekcje zachowano jako opis LAB1/LAB2.
 
-## Uruchomienie i testy
+## Uruchomienie i testy — historyczny tryb LAB1/LAB2
 
 Wymagania: Python 3.12 lub nowszy i internet do pobrania zależności. Skopiuj projekt na nowy komputer bez katalogu `.venv`. Otwórz terminal w katalogu z tym README.
 
@@ -637,3 +637,243 @@ Zajmowałem się kwestiami Inventory oraz sqlalchemy. Przeglądałem testy napis
 AI: użyto codexa to napisania testów. Pomógł też w kwestii ustalenia najlepszych wersji redisa i sqlalchemy
 
 
+
+## Etap LAB4 — bramka API i dwie niezależne usługi
+
+### Ciągłość projektu i zakres
+
+Punktem wyjścia był commit `d73867a` i **73 przechodzące testy** LAB1/LAB2. W tej wersji repozytorium nie było jeszcze implementacji LAB3: osobnych procesów, rejestracji w Eurece ani komunikacji HTTP między domenami. Uzupełniono te wymagane podstawy razem z LAB4, bez zmiany tematu systemu magazynowego. Zachowano wszystkie wcześniejsze testy, endpointy, transakcje SQLite, cache-aside, TTL i unieważnianie po commit. Wcześniejsze sekcje README opisują historyczne etapy; aktualne uruchomienie opisano poniżej.
+
+Inventory (`app.inventory:app`, port 8101, `INVENTORY-SERVICE`) posiada stany, rezerwacje, przyjęcia i bazę `inventory.db`. Outbound (`app.outbound:app`, port 8102, `OUTBOUND-SERVICE`) posiada zamówienia i bazę `outbound.db`. Każdy proces tworzy wyłącznie własne tabele i nie otwiera bazy drugiej usługi. Wspólny kod fabryki i repozytoriów nie oznacza wspólnego procesu ani dostępu do cudzych danych. `app.main:app` zachowano jako zgodny z wcześniejszymi etapami tryb obu domen w jednym procesie; nie używamy go do prezentacji LAB4.
+
+Nowy endpoint `GET /orders/stock-check/{stock_id}` w Outbound wywołuje `do_service("INVENTORY-SERVICE", "/stocks/{id}", return_type="json", prefer_ip=True, timeout=3)`. Wynik zawiera `stock` oraz `available_quantity = quantity - suma rezerwacji`. Jest to informacyjny odczyt, nie potwierdzenie rezerwacji zamówienia. Odpowiedzi zależności mapowane są na: `404` — brak stanu; `502` — nieoczekiwany błąd HTTP lub niepoprawne dane; `503` — brak instancji, błąd połączenia albo timeout. `/health` Outbound pozostaje dostępny przy awarii Inventory. Komunikacja wewnętrzna biegnie bezpośrednio do adresu z Eureki, bez bramki.
+
+Nie dodano Shipping, Auth, JWT, brokera, frontendu ani wspólnego Compose dla usług i bramki. Nadawanie zamówieniu `RESERVED`, zwalnianie rezerwacji i pełna realizacja zamówienia nadal wymagają kolejnego etapu. Inbound pozostaje modułem Inventory.
+
+### Architektura i odpowiedzialność
+
+```mermaid
+flowchart TB
+    C[Klient HTTP] -->|/api/...| G[API Gateway :8080]
+    G -->|lb://INVENTORY-SERVICE| I[Inventory :8101]
+    G -->|lb://OUTBOUND-SERVICE| O[Outbound :8102]
+    O -->|HTTP GET /stocks/id przez do_service| I
+    I --> IDB[(inventory.db: stocks, receipts)]
+    O --> ODB[(outbound.db: orders)]
+    I --> R[(Redis :6379, osobne prefiksy)]
+    O --> R
+    I -. rejestracja i heartbeat .-> E[Eureka :8761]
+    O -. rejestracja, heartbeat i kopia rejestru .-> E
+    G -. fetch-registry .-> E
+```
+
+Bramka wybiera trasę, usuwa segment `/api`, odnajduje instancję i przekazuje HTTP. Nie ma logiki magazynowej, bazy ani połączenia Redis. Eureka przechowuje nazwy, adresy i statusy instancji; nie pośredniczy w ruchu domenowym. Dane i reguły pozostają w usługach. BFF byłby interfejsem dostosowanym do konkretnego klienta; tutaj jedna wspólna bramka udostępnia API domenowe.
+
+### Kontrakt zewnętrzny
+
+| Metoda i ścieżka klienta `:8080` | Id trasy | URI | Ścieżka po `StripPrefix=1` | Właściciel i uzasadnienie |
+|---|---|---|---|---|
+| GET `/api/stocks`, GET/PATCH `/api/stocks/{id}` | inventory-stocks | `lb://INVENTORY-SERVICE` | `/stocks`, `/stocks/{id}` | Inventory: podgląd i korekta stanów |
+| POST `/api/stocks/{id}/reservations` | inventory-stocks | `lb://INVENTORY-SERVICE` | `/stocks/{id}/reservations` | Inventory: atomowa kontrola dostępności i rezerwacja |
+| POST/GET `/api/receipts`, GET `/api/receipts/{id}` | inventory-receipts | `lb://INVENTORY-SERVICE` | `/receipts`, `/receipts/{id}` | Inventory: rejestr i szczegóły dostaw |
+| POST `/api/receipts/{id}/accept`, `/post`, `/cancel` | inventory-receipts | `lb://INVENTORY-SERVICE` | `/receipts/{id}/accept`, `/post`, `/cancel` | Inventory: cykl przyjęcia i księgowanie we własnej transakcji |
+| POST/GET `/api/orders`, GET `/api/orders/{id}` | outbound-orders | `lb://OUTBOUND-SERVICE` | `/orders`, `/orders/{id}` | Outbound: dane zamówień |
+| POST `/api/orders/{id}/pack` | outbound-orders | `lb://OUTBOUND-SERVICE` | `/orders/{id}/pack` | Outbound: reguła pakowania tylko RESERVED |
+| GET `/api/orders/stock-check/{stock_id}` | outbound-orders | `lb://OUTBOUND-SERVICE` | `/orders/stock-check/{stock_id}` | Outbound: odczyt dostępności z Inventory przez Eurekę |
+
+Warunki `Path` obejmują jawnie kolekcję i podścieżki. Gateway zachowuje metodę, JSON, query string, kody i nagłówek `X-Cache` z usługi. Odpowiedzi usług przekazywane przez skonfigurowaną trasę otrzymują `X-Gateway: lab4`. Nieobsługiwana metoda nadal daje `405` z usługi.
+
+Endpointy techniczne każdej usługi `/health` (życie procesu), `/ready` (baza i Redis), `/docs`, `/redoc` i `/openapi.json` pozostają na portach bezpośrednich. Nie ma dla nich tras `/api/...`, ponieważ nie są operacjami domenowymi. Własny `/health` bramki zwraca `{"status":"ok","service":"API-GATEWAY"}` bez `X-Gateway`. Trasy są jawne: `discovery.locator.enabled: false`. Samo istnienie bramki nie blokuje bezpośrednich portów usług.
+
+Bramka ma `register-with-eureka: false` i `fetch-registry: true`; nie powinna pojawić się w rejestrze jako trzecia usługa. `defaultZone` musi kończyć się `/eureka/`. `lb://...` wykorzystuje lokalną kopię rejestru i LoadBalancer zamiast wpisanego na stałe portu. Klient Python również utrzymuje kopię rejestru. Domyślne odświeżanie trwa około 30 s; rejestr serwera i cache LoadBalancera mogą wydłużać obserwowane opóźnienie. Nie jest to natychmiastowy monitoring procesów.
+
+Limity bramki: `connect-timeout: 1000` ms i `response-timeout: 5s`. Wywołanie Outbound → Inventory ma `timeout=3` s dla pojedynczej instancji, więc zwykle zdąży zwrócić kontrolowane `503` przed limitem bramki. Timeout biblioteki HTTP nie stanowi ścisłego limitu całego łańcucha; przy wielu instancjach i ponowieniach czas może wzrosnąć. Testowano po jednej instancji każdej usługi.
+
+### Przygotowanie i uruchomienie
+
+Wymagania: Python 3.12+, JDK 21, Maven 3.9.x oraz Redis. W pakietach prowadzącego oba POM-y wskazują Spring Boot **4.1.1**, Spring Cloud **2025.1.3**; zachowano te wersje. Rozwiązane zależności: Gateway Server WebFlux **5.0.3**, Eureka **5.0.2**. Klient Python: `py-eureka-client==0.13.3`.
+
+Na Debianie przygotuj Python i narzędzia Java/Maven, ustaw `JAVA_HOME` oraz `PATH`, potem w głównym katalogu repozytorium:
+
+```bash
+java -version
+mvn -version
+bash scripts/setup.sh --setup-only --test
+mvn -f eureka-server/pom.xml package
+mvn -f gateway/pom.xml package
+```
+
+Pierwsze budowanie wymaga internetu. Na Windows przygotuj JDK 21 i Maven 3.9.x w PATH i zamiast skryptu Bash wykonaj:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -SetupOnly -Test
+mvn -f eureka-server/pom.xml package
+mvn -f gateway/pom.xml package
+```
+
+Uruchom pięć komponentów w poniższej kolejności. Każdy proces pierwszoplanowy uruchamiaj w osobnym terminalu z **głównego katalogu repozytorium**. Wszystkie serwery nasłuchują wyłącznie na `127.0.0.1`. Skrypty starszych etapów uruchamiają `app.main:app`; do LAB4 stosuj polecenia poniżej.
+
+1. Redis: `docker compose up -d redis`, następnie `docker compose exec redis redis-cli PING` (oczekiwane PONG). Można zamiast tego użyć własnego lokalnego serwera Redis.
+2. Eureka: `mvn -f eureka-server/pom.xml spring-boot:run`. Panel: `http://127.0.0.1:8761/`.
+3. Inventory (Bash):
+
+```bash
+export DATABASE_URL='sqlite:///./inventory.db'
+export REDIS_URL='redis://127.0.0.1:6379/0'
+export CACHE_PREFIX='lab4:131413:131427:warehouse'
+export CACHE_TTL_SECONDS=60
+export EUREKA_SERVER_URL='http://127.0.0.1:8761'
+export SERVICE_PORT=8101
+.venv/bin/python -m uvicorn app.inventory:app --host 127.0.0.1 --port 8101
+```
+
+4. Outbound w kolejnym terminalu (Bash):
+
+```bash
+export OUTBOUND_DATABASE_URL='sqlite:///./outbound.db'
+export REDIS_URL='redis://127.0.0.1:6379/0'
+export CACHE_PREFIX='lab4:131413:131427:warehouse'
+export CACHE_TTL_SECONDS=60
+export EUREKA_SERVER_URL='http://127.0.0.1:8761'
+export SERVICE_PORT=8102
+.venv/bin/python -m uvicorn app.outbound:app --host 127.0.0.1 --port 8102
+```
+
+Na Windows kroki 3 i 4 wykonaj w osobnych oknach PowerShell:
+
+```powershell
+# Inventory
+$env:DATABASE_URL = 'sqlite:///./inventory.db'
+$env:REDIS_URL = 'redis://127.0.0.1:6379/0'
+$env:CACHE_PREFIX = 'lab4:131413:131427:warehouse'
+$env:CACHE_TTL_SECONDS = '60'
+$env:EUREKA_SERVER_URL = 'http://127.0.0.1:8761'
+$env:SERVICE_PORT = '8101'
+.\.venv\Scripts\python.exe -m uvicorn app.inventory:app --host 127.0.0.1 --port 8101
+```
+
+```powershell
+# Outbound — osobny terminal
+$env:OUTBOUND_DATABASE_URL = 'sqlite:///./outbound.db'
+$env:REDIS_URL = 'redis://127.0.0.1:6379/0'
+$env:CACHE_PREFIX = 'lab4:131413:131427:warehouse'
+$env:CACHE_TTL_SECONDS = '60'
+$env:EUREKA_SERVER_URL = 'http://127.0.0.1:8761'
+$env:SERVICE_PORT = '8102'
+.\.venv\Scripts\python.exe -m uvicorn app.outbound:app --host 127.0.0.1 --port 8102
+```
+
+5. Gateway: `mvn -f gateway/pom.xml spring-boot:run`. Poczekaj, aż w Eurece będą dwa wpisy UP i obie trasy zaczną zwracać 200. Gateway nie rejestruje się jako instancja.
+
+| Zmienna | Domyślna wartość | Zastosowanie |
+|---|---|---|
+| `EUREKA_SERVER_URL` | `http://127.0.0.1:8761` | Klienci Python; sufiks `/eureka` dodaje adapter |
+| `SERVICE_PORT` | Inventory 8101, Outbound 8102 | Port zgłaszany przez usługę; musi zgadzać się z `uvicorn --port` |
+| `EUREKA_PORT` | 8761 | Port serwera Eureka |
+| `GATEWAY_EUREKA_URL` | `http://127.0.0.1:8761/eureka/` | Rejestr pobierany przez bramkę |
+| `GATEWAY_PORT` | 8080 | Port bramki |
+| `GATEWAY_URL` | `http://127.0.0.1:8080` | Adres bramki dla testów |
+
+Zmienne baz i cache zachowują znaczenie z LAB2. `.env.example` jest wzorem; nie jest automatycznie wczytywany. Zmiana portu Eureki wymaga aktualizacji URL w obu usługach i bramce. Po zmianie YAML zatrzymaj i ponownie uruchom Gateway.
+
+Weryfikacja ręczna (Windows: `curl.exe` zamiast `curl`):
+
+```bash
+curl -i http://127.0.0.1:8080/health
+curl -i http://127.0.0.1:8080/api/stocks
+# Podstaw UUID z listy stanów:
+curl -i http://127.0.0.1:8080/api/stocks/<UUID>
+curl -i http://127.0.0.1:8080/api/orders/stock-check/<UUID>
+```
+
+Przy pustej tabeli Inventory tworzy początkowy SKU-001, A-01, 10 sztuk. Aby przygotować dodatkowy zasób, użyj `/api/receipts`: utwórz przyjęcie z unikalnym SKU i lokalizacją, zatwierdź `/accept`, zaksięguj `/post`, następnie odszukaj SKU w `/api/stocks`. Nie kasuj bazy. Testy integracyjne stosują właśnie ten przepływ, zachowują dane testowe oznaczone `LAB4-...` i można uruchamiać je wielokrotnie. Wymagają działającego Redis, aby zweryfikować faktyczne MISS → HIT; BYPASS nie zastępuje sprawdzenia cache.
+
+Zatrzymanie: `Ctrl+C` kolejno w terminalach Gateway, Outbound, Inventory i Eureka. Uvicorn wyrejestrowuje usługę w `lifespan`; nie zamykaj go przez `kill -9` w zwykłej demonstracji. Redis uruchomiony dla projektu zatrzymaj `docker compose stop redis`. Zachowaj pliki baz. Awaria przez nagłe zabicie procesu może pozostawić wpis aż do wygaśnięcia dzierżawy, a zachowanie self-preservation Eureki dodatkowo opóźnia jego usunięcie.
+
+### Testy i powtarzalne eksperymenty
+
+Szybkie testy (atrapy Redis i Eureki, bez uruchomionych serwerów):
+
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python -m pip check
+```
+
+Testy integracyjne wymagające pięciu komponentów uruchomionych według powyższej instrukcji:
+
+```bash
+.venv/bin/python -m pytest -o addopts= tests/integration -q
+```
+
+Na Windows użyj `.\.venv\Scripts\python.exe`. `pytest.ini` domyślnie pomija katalog integracyjny; `-o addopts=` usuwa to pominięcie. Dzięki temu brak działającego systemu nie psuje szybkich testów. Nie ma automatycznego pomijania nieudanych połączeń w testach integracyjnych.
+
+| Test integracyjny | Weryfikacja |
+|---|---|
+| `test_inventory_read_has_gateway_and_cache_headers` | Pełny JSON stanu, 200, X-Gateway, MISS → HIT |
+| `test_outbound_read_executes_discovered_inventory_call` | Wywołanie Inventory przez Outbound i obliczona dostępność |
+| `test_write_invalidates_cache_and_read_returns_committed_change` | PATCH po HIT, zmiana ilości, MISS → HIT po commit |
+| `test_validation_and_conflict_are_forwarded_without_change` | Dokładne 422/409, detail, X-Gateway i brak zmiany stanu |
+| `test_domain_404_differs_from_missing_gateway_route` | 404 FastAPI z nagłówkiem vs 404 WebFlux bez nagłówka |
+| `test_gateway_does_not_publish_technical_endpoints` | Health Gateway oraz brak tras do health/ready/docs/schematu usług |
+| `test_outbound_order_write_and_read` | POST 201 i GET zamówienia z cache i zachowanym JSON |
+
+Dodatkowe testy `tests/test_discovery.py` obejmują start/stop klienta Eureki, użycie nazwy logicznej i timeoutu 3 s, mapowanie błędów, niepoprawne dane zależności, walidację UUID i niezależność tabel, plików baz oraz tras obu procesów.
+
+Pełna automatyczna weryfikacja na Debianie/WSL (JDK 21 i `redis-server` w PATH, JAR-y zbudowane, porty 8080/8101/8102/8761 wolne):
+
+```bash
+.venv/bin/python scripts/verify_lab4.py
+```
+
+Opcjonalne `--java /ścieżka/do/bin/java` wybiera Javę. Skrypt uruchamia własny Redis na wolnym porcie oraz Eureka, obie usługi i Gateway jako prawdziwe procesy, wykonuje testy HTTP i sześć eksperymentów, a następnie zatrzymuje tylko własne procesy. Korzysta z tymczasowych baz i unikalnego prefiksu, nie czyści współdzielonego cache. Wynik zapisuje w `reports/lab4-verification.json`. Porty można zmienić argumentami `--gateway-port`, `--inventory-port`, `--outbound-port`, `--eureka-port`. Eksperymenty trwają kilka minut ze względu na rzeczywiste odświeżanie rejestru. Jest to skrypt dla środowiska z lokalnym `redis-server`; na Windows można użyć WSL lub wykonać eksperymenty ręcznie na systemie uruchomionym powyżej.
+
+### Rzeczywiste wyniki (19.11.2026)
+
+Środowisko weryfikacji: Debian, Python **3.13.5**, Amazon Corretto **21.0.13.1**, Maven **3.9.9**, lokalny Redis **8.0.2**. Plik Compose nadal wskazuje Redis 7; rzeczywiste eksperymenty wykonano na osobnym lokalnym Redis 8.0.2. Oba komponenty Java: **BUILD SUCCESS**. Szybkie testy: **83 passed** (73 wcześniejsze + 10 przypadków związanych z rozdzieleniem usług i discovery). Integracyjne: **7 passed**. `pip check`: brak niespójności zależności. Ostrzeżenie Starlette/AnyIO dotyczy przestarzałego aliasu TestClient, nie niepowodzenia testów.
+
+Pełne odpowiedzi, nagłówki, stan rejestru i wynik pytest znajdują się w [raporcie rzeczywistego uruchomienia](reports/lab4-verification.json). W Eurece były wyłącznie `INVENTORY-SERVICE` i `OUTBOUND-SERVICE`, obie UP.
+
+| Scenariusz | Żądanie i stan procesów | Oczekiwany wynik | Rzeczywisty wynik i nagłówki | Wniosek |
+|---|---|---|---|---|
+| Odczyt Inventory | Dwa GET `/api/stocks/{id}` | 200, cache i X-Gateway | 200, X-Gateway=lab4; początkowo HIT/HIT, ponieważ odczyt przez Outbound wcześniej napełnił cache. Test integracyjny na nowym SKU potwierdził MISS/HIT | Cache należy do Inventory i działa także dla wywołań wewnętrznych |
+| Zapis i unieważnienie | PATCH quantity=12, dwa GET | 200, nowy stan i MISS/HIT | 200, quantity=12, X-Gateway=lab4, kolejno X-Cache=MISS i HIT | Commit i usunięcie kopii działają przez bramkę |
+| Walidacja i reguła | PATCH quantity=-1; rezerwacja 13 przy stanie 12 | 422 i 409 | 422 z błędem `body.quantity`; 409 z `Insufficient available stock`; oba z X-Gateway=lab4, bez X-Cache | Gateway zachowuje błędy domeny |
+| Odczyt Outbound | GET `/api/orders/stock-check/{id}` | 200 z danymi Inventory | 200, stock.quantity=12, available_quantity=12, X-Gateway=lab4; brak X-Cache w odpowiedzi złożonej Outbound | Outbound odkrywa Inventory bez udziału Gateway w połączeniu wewnętrznym |
+| **1. Brak zasobu** | GET `/api/stocks/{losowy UUID}` | 404 z FastAPI | 404, `{"detail":"Stock not found"}`, X-Gateway=lab4, brak X-Cache | Trasa istnieje, zasób nie istnieje |
+| **2. Brak trasy** | GET `/api/health` | 404 z Gateway | 404 WebFlux: timestamp/path/status/error/requestId, bez X-Gateway i X-Cache | Żądanie nie pasuje do żadnej trasy |
+| **3. Zatrzymanie Outbound** | Wyłączenie Outbound, GET jego trasy i stanu Inventory | Błąd tylko trasy Outbound | Natychmiast 500 WebFlux, po odświeżeniu 503 WebFlux, oba bez X-Gateway/X-Cache. Inventory 200, X-Gateway=lab4, X-Cache=HIT; jego /health 200 | Najpierw nieaktualny adres, następnie brak instancji w kopii rejestru. Zmiana 500 → 503 po około 35 s |
+| **4. Zatrzymanie Inventory** | Po przywróceniu Outbound wyłączono Inventory | Jego trasa nie działa, Outbound zwraca kontrolowane 503 | Trasa Inventory: natychmiast 500, po około 47 s 503 WebFlux, bez nagłówków. Outbound: 503 `{"detail":"Inventory Service is unavailable"}`, X-Gateway=lab4, brak X-Cache; /health Outbound 200 | Rozróżniamy awarię routingu od błędu zależności obsłużonego w usłudze |
+| **5. Ponowne uruchomienie** | Start Inventory na tych samych danych; oba GET przez istniejącą bramkę | Powrót 200 bez restartu Gateway | Obie trasy 200 po **49,14 s** od rozpoczęcia startu; PID Gateway nie zmienił się. X-Gateway=lab4 na obu, X-Cache=HIT na szczegółach Inventory; UUID i quantity=12 zachowane | Rejestr i jego kopie odświeżają się asynchronicznie; cache może przetrwać restart usługi |
+| **6. Zatrzymanie Gateway** | Wyłączono bramkę, pozostawiono usługi i Eurekę | Odmowa TCP, usługi bezpośrednio działają | HTTPX ConnectError na :8080; bez odpowiedzi HTTP i nagłówków. Bezpośrednie Inventory i przepływ Outbound → Inventory: 200; Inventory X-Cache=HIT, brak X-Gateway | Pojedyncza bramka jest punktem awarii ruchu klienta, nie komunikacji wewnętrznej |
+
+Czasy około 35 s i 47 s wyliczono z timestampów pierwszej i końcowej odpowiedzi w eksperymentach 3 i 4. Czas 49,14 s zmierzono zegarem monotonicznym w skrypcie, łącznie ze startem procesu. Nie jest to gwarantowany czas odtwarzania; zależy od fazy odświeżania i cache rejestru.
+
+| Wynik widoczny u klienta | Miejsce powstania i znaczenie |
+|---|---|
+| 404 z `detail` i X-Gateway | FastAPI: brak zasobu; możliwe również 404 mapowane przez Outbound przy braku stanu w Inventory |
+| 404 WebFlux, brak X-Gateway | Brak pasującej trasy w Gateway |
+| 422 / 409 z X-Gateway | Walidacja / reguła biznesowa w usłudze |
+| 502 z X-Gateway | Outbound: nieoczekiwany błąd HTTP lub niepoprawna odpowiedź Inventory; pokryte testami z atrapami |
+| 503 z `detail` i X-Gateway | Outbound: brak dostępnego Inventory, timeout albo błąd połączenia |
+| 503 WebFlux | Gateway LoadBalancer: brak instancji; w wykonanych eksperymentach bez X-Gateway |
+| 500 / potencjalne 504 WebFlux | Błąd połączenia ze starym adresem / przekroczenie response-timeout; 500 zmierzono, 504 nie symulowano |
+| ConnectError bez HTTP | Nie działa proces nasłuchujący na porcie bramki |
+
+Brak X-Gateway sam w sobie nie dowodzi braku trasy: w wykonanych eksperymentach filtr nie dołączał go również do błędów połączenia i braku instancji generowanych przez Gateway. Należy porównać kod, ciało odpowiedzi i logi. X-Cache występuje na szczegółach stanów i zamówień, nie na listach, zapisach ani odpowiedzi złożonej stock-check. Samo `/health` nie dowodzi dostępności zależności. Nie testowano wielu instancji, nagłego zabicia procesu bez wyrejestrowania ani wymuszonego timeoutu 504. Ograniczenia cache-aside i SQLite z LAB2 pozostają aktualne.
+
+### Źródła techniczne (EK_03) i autorzy
+
+Materiały prowadzącego: [instrukcja LAB4](https://pawoom.lazysolutions.pl/2026_2027/lab4/), [pakiet LAB4](https://pawoom.lazysolutions.pl/2026_2027/lab4/lab4-support.zip) i [pakiet LAB3](https://pawoom.lazysolutions.pl/2026_2027/lab3/lab3-support.zip). Z pakietów przeniesiono infrastrukturę Java (POM-y, klasy startowe) i dostosowano YAML do własnej domeny. Układ sekcji dokumentacji oparto na szablonie README-LAB4. Nie przenoszono usług demonstracyjnych ani ich modeli.
+
+| Oficjalna dokumentacja i wersja | Rozwiązywany problem | Zastosowanie | Weryfikacja |
+|---|---|---|---|
+| [Spring Cloud Gateway Server WebFlux — starter](https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/starter.html), linia 5.0 (runtime 5.0.3) | Dobór reaktywnego serwera | `spring-cloud-starter-gateway-server-webflux` oraz LoadBalancer w POM | Maven package, uruchomienie Netty i żądania przez trzy trasy |
+| [StripPrefix GatewayFilter](https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/gatewayfilter-factories/stripprefix-factory.html), linia 5.0 | Zachowanie dotychczasowych ścieżek FastAPI za prefiksem /api | `spring.cloud.gateway.server.webflux.routes`, `StripPrefix=1` | GET/PATCH/POST przez /api, zachowany JSON, 404/409/422, nagłówki w testach |
+| [HTTP timeouts](https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/http-timeouts-configuration.html), linia 5.0 | Ograniczenie oczekiwania na zależność | connect-timeout=1000 ms, response-timeout=5s; krótsze timeout=3 w Pythonie | W eksperymencie awarii Outbound zwrócił własne 503 przez bramkę; nie deklarujemy pomiaru 504 |
+| [Spring Cloud Netflix — Eureka Client](https://docs.spring.io/spring-cloud-netflix/reference/spring-cloud-netflix.html), linia 5.0 (runtime 5.0.2) | Pobieranie instancji bez rejestracji Gateway | fetch-registry=true, register-with-eureka=false, defaultZone z /eureka/ | Raport z dwoma wpisami UP, routowanie lb:// i odzyskanie tras bez restartu bramki |
+
+Dokumentacja online opisuje linię 5.0 i może wskazywać nowszy patch niż zależności BOM z pakietu prowadzącego. Działanie konfiguracji zweryfikowano na wersjach rzeczywiście zbudowanych z POM-ów.
+
+Autorzy projektu: **131427** — wcześniejszy deklarowany zakres Outbound/Redis; **131413** — wcześniejszy deklarowany zakres Inventory/SQLAlchemy. Dla LAB4 nie przypisujemy autorom niepotwierdzonych czynności. Implementację rozdzielenia procesów, adapter Eureki, konfigurację bramki, testy, skrypt eksperymentów i dokumentację przygotował Codex na polecenie użytkownika. Weryfikacja AI obejmowała przeczytanie instrukcji i źródeł, uruchomienie 73 wcześniejszych testów przed zmianami, 83 testów po zmianach, zbudowanie obu projektów Maven, 7 testów integracyjnych oraz rzeczywiste eksperymenty z zapisanym raportem. Każdy autor powinien samodzielnie przeanalizować konfigurację i przećwiczyć zmianę prefiksu przed odbiorem; nie deklarujemy, że taki odbiór już się odbył.
+
+Wersja do przekazania pozostaje w tym repozytorium. `.gitignore` wyklucza `.venv`, cache Pythona, lokalne bazy, `.env` i katalogi `target` obu projektów Maven. Nie utworzono automatycznie commita, tagu ani publikacji. Po przeglądzie można utworzyć commit etapu i tag `lab4` zgodnie z instrukcją; istniejącego tagu nie należy nadpisywać.

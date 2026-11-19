@@ -1,0 +1,43 @@
+server:
+  address: 127.0.0.1
+  port: ${GATEWAY_PORT:8080}
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          discovery:
+            locator:
+              enabled: false
+          httpclient:
+            connect-timeout: 1000
+            response-timeout: 5s
+          default-filters:
+            - AddResponseHeader=X-Gateway, lab4
+          routes:
+            - id: inventory-stocks
+              uri: lb://INVENTORY-SERVICE
+              predicates:
+                - Path=/api/stocks,/api/stocks/**
+              filters:
+                - StripPrefix=1
+            - id: inventory-receipts
+              uri: lb://INVENTORY-SERVICE
+              predicates:
+                - Path=/api/receipts,/api/receipts/**
+              filters:
+                - StripPrefix=1
+            - id: outbound-orders
+              uri: lb://OUTBOUND-SERVICE
+              predicates:
+                - Path=/api/orders,/api/orders/**
+              filters:
+                - StripPrefix=1
+eureka:
+  client:
+    register-with-eureka: false
+    fetch-registry: true
+    service-url:
+      defaultZone: ${GATEWAY_EUREKA_URL:http://127.0.0.1:8761/eureka/}

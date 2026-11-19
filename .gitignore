@@ -9,3 +9,5 @@ __pycache__/
 *.sqlite
 *.sqlite-*
 .env
+gateway/target/
+eureka-server/target/
