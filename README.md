@@ -1,6 +1,184 @@
 # System magazynowy — Inventory, Outbound, Shipping i Auth
 
-Docelowo system obejmuje cztery mikrousługi: Inventory, Outbound, Shipping i Auth. **Zaimplementowane są Inventory i Outbound**; Shipping i Auth pozostają planowane. Inventory odpowiada za stany, rezerwacje i przyjęcia towaru. **Inbound jest modułem Inventory**, korzysta z tej samej bazy i transakcji. Outbound odpowiada za zamówienia, Shipping będzie obsługiwać wysyłkę, a Auth — konta, logowanie i role. W aktualnym LAB4 Inventory i Outbound działają jako osobne procesy FastAPI (:8101 i :8102), z własnymi bazami SQLite, cache Redis, rejestrem Eureka (:8761) i bramką Spring Cloud Gateway (:8080). [Aktualna instrukcja LAB4](#etap-lab4--bramka-api-i-dwie-niezależne-usługi) znajduje się na końcu dokumentacji; wcześniejsze sekcje zachowano jako opis LAB1/LAB2.
+## Aktualny stan — cztery mikrousługi
+
+Zaimplementowane są **Inventory, Outbound, Shipping i Auth**. Każda usługa działa jako osobny proces i posiada własną bazę SQLite. Inbound (przyjęcia dostaw) pozostaje modułem Inventory. Wszystkie usługi rejestrują się w Eurece, a Gateway udostępnia ich API pod `/api/...`.
+
+| Usługa | Plik startowy | Port | Baza / tabele | Odpowiedzialność |
+|---|---|---|---|---|
+| Inventory | `app/inventory.py` | 8101 | `inventory.db`: stocks, receipts, reservation_batches | Stany, przyjęcia, rezerwacje |
+| Outbound | `app/outbound.py` | 8102 | `outbound.db`: orders, order_dispatches | Zamówienia, rezerwowanie przez Inventory, pakowanie i potwierdzanie wysyłki |
+| Shipping | `app/shipping.py` | 8103 | `shipping.db`: shipments | Przesyłki, przygotowanie, wydanie kurierowi i powiadomienie Outbound |
+| Auth | `app/auth.py` | 8104 | `auth.db`: users | Konta, Argon2id, logowanie, JWT RS256 i role |
+
+Gateway działa na :8080, Eureka na :8761, a Redis domyślnie na :6379. Auth nie korzysta z Redis. Shipping zapisuje i czyta przesyłki bez cache; wspólna fabryka inicjalizuje adapter Redis i uwzględnia go w `/ready`, lecz jego awaria nie blokuje operacji na przesyłkach.
+
+```mermaid
+flowchart TB
+    C[Klient + JWT] --> G[Gateway :8080]
+    G --> I[Inventory :8101]
+    G --> O[Outbound :8102]
+    G --> S[Shipping :8103]
+    G --> A[Auth :8104]
+    O -->|HTTP z JWT: rezerwacja i odczyt| I
+    S -->|HTTP z JWT: PACKED i dispatch| O
+    I --> ID[(inventory.db)]
+    O --> OD[(outbound.db)]
+    S --> SD[(shipping.db)]
+    A --> AD[(auth.db)]
+    I --> R[(Redis)]
+    O --> R
+    G -. pobieranie rejestru .-> E[Eureka :8761]
+    I -. rejestracja .-> E
+    O -. rejestracja i rejestr .-> E
+    S -. rejestracja i rejestr .-> E
+    A -. rejestracja .-> E
+```
+
+### Konta, JWT i role
+
+Auth przechowuje wyłącznie hashe Argon2id. JWT zawiera identyfikator użytkownika, rolę, wystawcę, odbiorcę, czasy ważności i identyfikator tokenu; nie zawiera hasła. Tylko Auth podpisuje token kluczem prywatnym RSA. Inventory, Outbound i Shipping znają klucz publiczny i sprawdzają podpis RS256, issuer, audience oraz exp/iat/nbf. Algorytm jest ustalony w kodzie, nie pobierany z niezaufanego nagłówka tokenu. Domyślny czas ważności to 900 s, konfigurowalny od 1 do 3600 s.
+
+| Rola | Uprawnienia |
+|---|---|
+| ADMIN | Wszystkie operacje, tworzenie kont i aktywowanie/dezaktywowanie użytkowników |
+| WAREHOUSE | Inventory i zwykłe operacje Outbound: zamówienia, rezerwowanie, pakowanie |
+| SHIPPING | Shipping oraz wąskie endpointy Outbound `/orders/{id}/shipping-check` i `/orders/{id}/dispatch` |
+
+Gateway zachowuje domyślny timeout odpowiedzi 5 s, a trasa Shipping ma `metadata.response-timeout: 10000` (10 s). Wydanie kurierowi wykonuje dwa kolejne wywołania Outbound z timeoutem 3 s, więc wymaga większego budżetu niż pojedynczy odczyt. Testy HTTP mają limit 15 s.
+
+Brak lub błędny token daje 401; niewłaściwa rola 403. Kontrola działa również na bezpośrednich portach usług. `/health`, `/ready` i dokumentacja pozostają technicznie dostępne lokalnie. Auth sprawdza aktywność konta przy logowaniu i `/auth/me`, a także aktualną rolę administratora przy zarządzaniu kontami. Pozostałe usługi weryfikują JWT lokalnie: dezaktywowanie konta nie unieważnia natychmiast jego już wydanego tokenu, który może działać do `exp`. Zatrzymanie Auth nie blokuje operacji z ważnym tokenem. Nie dodano refresh tokenów, centralnej listy unieważnień ani limitowania prób logowania.
+
+Kontrola JWT jest domyślnie włączona we wspólnej fabryce (także `app.main:app`). Jawne `auth_enabled=False` w testach izoluje historyczne scenariusze biznesowe od uwierzytelniania; oddzielne testy sprawdzają zabezpieczenia z prawdziwymi podpisami. Nie ma zmiennej środowiskowej wyłączającej ochronę. Auth zawsze wymaga uwierzytelniania swoich chronionych operacji. Brak klucza publicznego przy włączonej ochronie przerywa start usługi; nie ma automatycznego przejścia w tryb bez ochrony.
+
+### Przygotowanie i uruchomienie wszystkich usług
+
+Z głównego katalogu repozytorium przygotuj zależności (Python 3.12+, JDK 21 i Maven 3.9.x):
+
+```bash
+bash scripts/setup.sh --setup-only --test
+mvn -f eureka-server/pom.xml package
+mvn -f gateway/pom.xml package
+.venv/bin/python scripts/init_auth.py --email admin@example.com
+```
+
+Na Windows zamiast pierwszego polecenia użyj `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -SetupOnly -Test`; zamiast `.venv/bin/python` używaj `.\.venv\Scripts\python.exe`.
+
+`init_auth.py` pyta dwukrotnie o hasło (12–128 znaków), tworzy lokalną parę RSA 2048 w `.local/` i pierwszego administratora w `auth.db`. Hasło nie jest argumentem procesu i nie trafia do repozytorium. Nie ma domyślnego hasła. Skrypt odmawia utworzenia kolejnego administratora startowego, gdy tabela użytkowników zawiera już konto, oraz nie nadpisuje kluczy. Kolejne konta tworzy administrator przez API. Nie usuwaj bazy ani kluczy przy zwykłym restarcie.
+
+Uruchom kolejno, w osobnych terminalach z głównego katalogu projektu:
+
+```bash
+# 1. Redis — opcjonalnie własny lokalny serwer zamiast Compose
+docker compose up -d redis
+
+# 2. Eureka
+mvn -f eureka-server/pom.xml spring-boot:run
+
+# 3. Auth
+.venv/bin/python -m uvicorn app.auth:app --host 127.0.0.1 --port 8104
+
+# 4. Inventory
+.venv/bin/python -m uvicorn app.inventory:app --host 127.0.0.1 --port 8101
+
+# 5. Outbound
+.venv/bin/python -m uvicorn app.outbound:app --host 127.0.0.1 --port 8102
+
+# 6. Shipping
+.venv/bin/python -m uvicorn app.shipping:app --host 127.0.0.1 --port 8103
+
+# 7. Gateway
+mvn -f gateway/pom.xml spring-boot:run
+```
+
+Nie trzeba ustawiać `SERVICE_PORT` przy domyślnych portach powyżej. Jeżeli ta zmienna pozostała ustawiona w terminalu z wcześniejszego etapu, usuń ją (`unset SERVICE_PORT` w Bash; `Remove-Item Env:SERVICE_PORT -ErrorAction SilentlyContinue` w PowerShell) lub ustaw właściwą wartość dla danego procesu. Przy niestandardowym `--port` ustaw również odpowiadający mu `SERVICE_PORT`, aby Eureka zgłaszała właściwy adres.
+
+| Zmienna | Domyślnie |
+|---|---|
+| DATABASE_URL / OUTBOUND_DATABASE_URL | `sqlite:///./inventory.db` / `sqlite:///./outbound.db` |
+| SHIPPING_DATABASE_URL / AUTH_DATABASE_URL | `sqlite:///./shipping.db` / `sqlite:///./auth.db` |
+| JWT_PRIVATE_KEY_FILE | `.local/jwt-private.pem` — potrzebny wyłącznie Auth |
+| JWT_PUBLIC_KEY_FILE | `.local/jwt-public.pem` — publiczny klucz weryfikacji |
+| JWT_ISSUER / JWT_AUDIENCE | `warehouse-auth` / `warehouse-api` — muszą być zgodne we wszystkich usługach |
+| JWT_TTL_SECONDS | 900 — używane w Auth |
+| EUREKA_SERVER_URL | `http://127.0.0.1:8761` |
+| GATEWAY_EUREKA_URL | `http://127.0.0.1:8761/eureka/` |
+| REDIS_URL | `redis://127.0.0.1:6379/0` |
+| CACHE_PREFIX / CACHE_TTL_SECONDS | `lab2:local:warehouse` / 60 |
+
+`.env.example` nie jest wczytywany automatycznie. Ustaw zmienne w terminalach, jeżeli zmieniasz domyślne wartości. Pliki SQLite pozostają w katalogu roboczym; nowe tabele pomocnicze w istniejących bazach Inventory i Outbound tworzą się przy starcie, bez zmiany dotychczasowych kolumn i bez kasowania danych. Każdy proces tworzy tylko własne tabele.
+
+Poczekaj na cztery wpisy UP w Eurece i odświeżenie lokalnych rejestrów Gateway, Outbound oraz Shipping. Pierwsze wywołania zależności mogą zwracać kontrolowane 503, zanim zakończy się discovery. Interaktywne dokumentacje są na `/docs` portów 8101–8104. W Swaggerze Auth wykonaj `/auth/login`, skopiuj `access_token`, a następnie w wybranej usłudze użyj przycisku **Authorize** i wklej sam token.
+
+Zatrzymanie: Ctrl+C w terminalach Gateway, Shipping, Outbound, Inventory, Auth i Eureka; dla własnego Redis z Compose: `docker compose stop redis`. Pozostaw bazy i klucze na dysku.
+
+### Endpointy nowych usług i przepływ realizacji zamówienia
+
+Poniżej ścieżki widziane przez klienta Gateway (:8080); `StripPrefix=1` usuwa `/api`. Bezpośrednie porty usług używają ścieżek bez `/api`.
+
+| Metoda i ścieżka | Działanie | Rola |
+|---|---|---|
+| POST `/api/auth/login` | Email i hasło → access_token, token_type | Publiczne logowanie |
+| GET `/api/auth/me` | Profil aktywnego użytkownika, bez hasha | Każda zalogowana rola |
+| POST `/api/auth/users` | Konto: email, password, role; sukces 201 | ADMIN |
+| PATCH `/api/auth/users/{id}` | `{"is_active":false}` lub true; ostatni aktywny administrator nie może zostać wyłączony | ADMIN |
+| POST `/api/orders/{id}/reserve` | Rezerwacja wszystkich pozycji przez Inventory i status RESERVED | WAREHOUSE, ADMIN |
+| POST `/api/orders/{id}/pack` | RESERVED → PACKED | WAREHOUSE, ADMIN |
+| POST `/api/shipments` | order_id, carrier, weight_kg; nowe NEW, sukces 201 | SHIPPING, ADMIN |
+| GET `/api/shipments`, GET `/api/shipments/{id}` | Lista i szczegóły przesyłek | SHIPPING, ADMIN |
+| POST `/api/shipments/{id}/ready` | NEW → READY; sprawdza PACKED w Outbound | SHIPPING, ADMIN |
+| POST `/api/shipments/{id}/hand-over` | READY → HANDED_OVER, czas UTC i powiadomienie Outbound | SHIPPING, ADMIN |
+| POST `/api/shipments/{id}/cancel` | NEW/READY → CANCELLED | SHIPPING, ADMIN |
+| POST `/api/shipments/{id}/sync` | Ponowienie oczekującego powiadomienia o wysyłce | SHIPPING, ADMIN |
+
+Shipping rejestruje przesyłkę wyłącznie dla istniejącego zamówienia PACKED i ponownie sprawdza stan przed przygotowaniem oraz wydaniem. Outbound udostępnia Shipping bezpośredni odczyt bazy (`/orders/{id}/shipping-check`), aby decyzja nie opierała się na potencjalnie starej kopii Redis. Powiadomienie `POST /orders/{id}/dispatch` zmienia PACKED → SHIPPED, zapisuje identyfikator przesyłki i unieważnia cache zamówienia. Ponowienie z tym samym shipment_id jest idempotentne, a inne shipment_id daje 409. Te dwa wąskie endpointy mają rolę SHIPPING/ADMIN; WAREHOUSE nie może sam oznaczyć zamówienia jako wysłanego.
+
+Przykłady JSON:
+
+```json
+{"email":"pracownik@example.com","password":"haslo-co-najmniej-12-znakow","role":"WAREHOUSE"}
+```
+
+```json
+{"order_id":"UUID-spakowanego-zamowienia","carrier":"Firma kurierska","weight_kg":2.5}
+```
+
+Każde żądanie domenowe wymaga `Authorization: Bearer <access_token>`. Gateway przekazuje ten nagłówek, a wywołania Outbound → Inventory i Shipping → Outbound zachowują token użytkownika oraz `Content-Type: application/json` przy wysyłaniu JSON. Bramka nie sprawdza reguł biznesowych i nie łączy się z bazami.
+
+Przykładowa kolejność przez Gateway: zaloguj administratora, utwórz pracownika WAREHOUSE i SHIPPING, utwórz zamówienie, wykonaj `/reserve`, `/pack`, utwórz przesyłkę, wykonaj `/ready` i `/hand-over`. Stan zamówienia kończy się na SHIPPED, przesyłki na HANDED_OVER.
+
+Rezerwacja zbiorcza Inventory (`POST /reservations`, tylko port Inventory) obejmuje wszystkie SKU i lokalizacje w jednej transakcji. Brak towaru daje 409 i rollback całej operacji. Zapisuje żądanie według order_id, więc utracona odpowiedź lub ponowienie po błędzie zapisu Outbound nie rezerwuje towaru drugi raz. Zmienione pozycje pod tym samym order_id dają 409. Outbound nadaje RESERVED dopiero po poprawnym potwierdzeniu. Nie dodano zewnętrznej trasy `/api/reservations`; klient korzysta z operacji na zamówieniu.
+
+Wydanie kurierowi i wpis `notification_pending=true` są jedną transakcją Shipping. Potem usługa próbuje powiadomić Outbound. Jeżeli powiadomienie się nie powiedzie lub odpowiedź zostanie utracona, przesyłka pozostaje HANDED_OVER i odpowiedź zawiera `notification_pending=true`; nie cofamy zapisanego faktu wydania. Po przywróceniu połączenia wywołaj `/sync` z ważnym tokenem. Udane potwierdzenie ustawia false. To trwałe ponowienie sterowane API, bez brokera i bez automatycznego procesu w tle; stan oczekujący przetrwa restart.
+
+Ograniczenia: jedna przesyłka na zamówienie, także po jej anulowaniu; brak etykiet i numerów śledzenia. Rezerwacje po wysyłce pozostają zapisane w Inventory — nie dodano fizycznego rozchodu towaru ani zwalniania rezerwacji. Nie ma transakcji obejmującej dwie bazy; dlatego jawnie obsługujemy ponowienia i stan oczekującego powiadomienia. Nie dodano paczkomatów ani integracji z przewoźnikiem.
+
+### Testy nowych usług
+
+Wynik końcowej weryfikacji (19.11.2026): **101 testów jednostkowych i komponentowych oraz 11 integracyjnych przeszło**. Gateway zbudował się poprawnie, `pip check` nie wykazał niespójnych zależności. Cztery usługi zarejestrowały się w Eurece jako UP. Potwierdzono trwałość kont i przesyłek po restartach oraz działanie ważnego JWT przy zatrzymanym Auth. [Raport rzeczywistego wykonania](verification/services.json) dotyczy niezależnego środowiska na portach 18080, 18101–18104 i 18761.
+
+```bash
+# Szybkie testy: SQLite, prawdziwe podpisy RSA, atrapy Redis i discovery
+.venv/bin/python -m pytest -q
+.venv/bin/python -m pip check
+
+# Prawdziwy system już działa; GATEWAY_TOKEN to token administratora
+export GATEWAY_TOKEN='<access_token>'
+.venv/bin/python -m pytest -o addopts= tests/integration -q
+
+# Weryfikacja na własnych tymczasowych bazach i procesach, Debian/WSL:
+.venv/bin/python scripts/verify_services.py
+```
+
+W PowerShell token ustaw przez `$env:GATEWAY_TOKEN = '<access_token>'`. Testy integracyjne tworzą własne unikalne SKU, zamówienia i konta; nie kasują baz użytkownika. Wymagają wszystkich czterech usług i sprawnego Redis. Skrypt `verify_services.py` wymaga zbudowanych JAR-ów, `redis-server` i Java 21 w PATH (opcjonalnie `--java /ścieżka/bin/java`). Sprawdza wolne porty 8080/8101–8104/8761, uruchamia własne siedem procesów, tworzy klucze i administratora tylko w katalogu tymczasowym, wykonuje integracje oraz restarty Shipping i Auth. Nie zatrzymuje procesów użytkownika ani nie czyści współdzielonego cache. Wynik zapisuje w `verification/services.json`. Jeżeli standardowe porty są zajęte, dodaj `--port-offset 10000`: testy użyją 18080, 18101–18104 i 18761, bez zatrzymywania istniejących procesów.
+
+Nowe testy obejmują: hashe i brak haseł w odpowiedziach/walidacji, aktywność kont, unikalność emaila, role na bezpośrednich portach, JWT o złym podpisie/algorytmie/wystawcy/odbiorcy/czasie, atomowość rezerwacji, legalne przejścia statusów przesyłki, awarie zależności i utratę odpowiedzi po zatwierdzonym dispatch. W integracjach poprzednie siedem scenariuszy bramki działa z JWT, a cztery nowe sprawdzają Auth, role oraz pełny przepływ wysyłki.
+
+Oficjalne źródła: [PyJWT — podpisy RSA i walidacja claims](https://pyjwt.readthedocs.io/en/stable/usage.html), użyte PyJWT 2.15.1; [argon2-cffi — PasswordHasher](https://argon2-cffi.readthedocs.io/en/stable/howto.html), użyte 25.1.0. Ich zastosowanie sprawdzono testami błędnych tokenów i logowania oraz rzeczywistym wywołaniem HTTP między usługami. Implementację i testy przygotował Codex na polecenie użytkownika; nie przypisujemy autorom projektu niepotwierdzonego udziału w tych zmianach.
+
+## Dokumentacja historycznych etapów
+
+Poniższe sekcje zachowują opis LAB1–LAB4 sprzed wdrożenia Shipping i Auth. Występujące w nich określenia „planowane” i przykłady bez JWT dotyczą tamtego stanu projektu. Do aktualnego uruchomienia stosuj instrukcję powyżej.
 
 ## Uruchomienie i testy — historyczny tryb LAB1/LAB2
 

@@ -1,7 +1,7 @@
 import os
 from contextlib import ExitStack, asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 from sqlalchemy import text
@@ -9,25 +9,32 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.cache import JsonCache, make_redis
 from app.database import Base, make_database
-from app.db_models import OrderRow, ReceiptRow, StockRow
+from app.db_models import OrderDispatchRow, OrderRow, ReceiptRow, ReservationBatchRow, ShipmentRow, StockRow
 from app.discovery import create_eureka_client
 from app.repositories import OrderRepository, ReceiptRepository, StockRepository
-from app.routers import health, orders, receipts, stocks
+from app.routers import allocations, health, orders, receipts, shipments, stocks
+from app.security import TokenVerifier, require_roles
+from app.services.allocation import AllocationService
 from app.services.orders import OrderService
 from app.services.receipts import ReceiptService
+from app.services.shipping import ShippingService
 from app.services.stocks import StockService
 
 
 def create_app(database_url=None, redis_client=None, *, outbound_database_url=None,
                cache_prefix=None, cache_ttl=None, domain="both",
-               discovery_enabled=False, eureka_client=None) -> FastAPI:
-    if domain not in {"both", "inventory", "outbound"}:
+               discovery_enabled=False, eureka_client=None, shipping_database_url=None,
+               auth_enabled=None, token_verifier=None) -> FastAPI:
+    if domain not in {"both", "inventory", "outbound", "shipping"}:
         raise ValueError("Unknown domain")
     inventory_enabled = domain in {"both", "inventory"}
     outbound_enabled = domain in {"both", "outbound"}
 
     @asynccontextmanager
     async def lifespan(app):
+        enabled = auth_enabled if auth_enabled is not None else True
+        app.state.auth_enabled = enabled
+        app.state.token_verifier = token_verifier or (TokenVerifier.from_env() if enabled else None)
         prefix = cache_prefix if cache_prefix is not None else os.getenv("CACHE_PREFIX", "lab2:local:warehouse")
         ttl = int(cache_ttl if cache_ttl is not None else os.getenv("CACHE_TTL_SECONDS", "60"))
         if not prefix.strip():
@@ -42,7 +49,7 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
                 engine, sessions = make_database(
                     database_url or os.getenv("DATABASE_URL", "sqlite:///./inventory.db"))
                 resources.callback(engine.dispose)
-                Base.metadata.create_all(engine, tables=[StockRow.__table__, ReceiptRow.__table__])
+                Base.metadata.create_all(engine, tables=[StockRow.__table__, ReceiptRow.__table__, ReservationBatchRow.__table__])
                 app.state.engine = engine
                 app.state.databases["inventory"] = engine
                 app.state.stock_repository = StockRepository(sessions)
@@ -50,21 +57,30 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
                 app.state.stock_cache = JsonCache(client, prefix=f"{prefix}:inventory", ttl=ttl, resource_name="stock")
                 app.state.stock_service = StockService(app.state.stock_repository, app.state.stock_cache)
                 app.state.receipt_service = ReceiptService(app.state.receipt_repository, app.state.stock_cache)
+                app.state.allocation_service = AllocationService(sessions, app.state.stock_cache)
                 app.state.stock_repository.seed()
             if outbound_enabled:
                 engine, sessions = make_database(
                     outbound_database_url or os.getenv("OUTBOUND_DATABASE_URL", "sqlite:///./outbound.db"))
                 resources.callback(engine.dispose)
-                Base.metadata.create_all(engine, tables=[OrderRow.__table__])
+                Base.metadata.create_all(engine, tables=[OrderRow.__table__, OrderDispatchRow.__table__])
                 app.state.outbound_engine = engine
                 app.state.databases["outbound"] = engine
                 app.state.order_repository = OrderRepository(sessions)
                 app.state.order_cache = JsonCache(client, prefix=f"{prefix}:outbound", ttl=ttl, resource_name="order")
                 app.state.order_service = OrderService(app.state.order_repository, app.state.order_cache)
+            if domain == "shipping":
+                engine, sessions = make_database(shipping_database_url or os.getenv("SHIPPING_DATABASE_URL", "sqlite:///./shipping.db"))
+                resources.callback(engine.dispose)
+                Base.metadata.create_all(engine, tables=[ShipmentRow.__table__])
+                app.state.databases["shipping"] = engine
+                app.state.shipping_service = ShippingService(sessions, eureka_client)
             app.state.eureka_client = eureka_client
             if discovery_enabled:
                 discovery = eureka_client if eureka_client is not None else create_eureka_client(domain)
                 app.state.eureka_client = discovery
+                if domain == "shipping":
+                    app.state.shipping_service.discovery = discovery
                 try:
                     await discovery.start()
                     yield
@@ -73,15 +89,18 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
                 return
             yield
 
-    app = FastAPI(title=f"Magazyn — {domain}", version="0.4.0",
-                  description="Inventory: stany i przyjęcia; Outbound: zamówienia. SQLite i Redis.", lifespan=lifespan)
+    app = FastAPI(title=f"Magazyn — {domain}", version="0.5.0",
+                  description="System magazynowy: dane własnej domeny w SQLite, JWT i Eureka.", lifespan=lifespan)
     if domain == "both":
         app.include_router(health.router)
     if inventory_enabled:
-        app.include_router(stocks.router)
-        app.include_router(receipts.router)
+        app.include_router(stocks.router, dependencies=[Depends(require_roles("WAREHOUSE"))])
+        app.include_router(allocations.router)
+        app.include_router(receipts.router, dependencies=[Depends(require_roles("WAREHOUSE"))])
     if outbound_enabled:
         app.include_router(orders.router)
+    if domain == "shipping":
+        app.include_router(shipments.router)
     if domain != "both":
         @app.get("/health")
         def service_health():

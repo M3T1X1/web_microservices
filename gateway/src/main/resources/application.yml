@@ -35,6 +35,20 @@ spring:
                 - Path=/api/orders,/api/orders/**
               filters:
                 - StripPrefix=1
+            - id: shipping-shipments
+              uri: lb://SHIPPING-SERVICE
+              metadata:
+                response-timeout: 10000
+              predicates:
+                - Path=/api/shipments,/api/shipments/**
+              filters:
+                - StripPrefix=1
+            - id: auth-users
+              uri: lb://AUTH-SERVICE
+              predicates:
+                - Path=/api/auth,/api/auth/**
+              filters:
+                - StripPrefix=1
 eureka:
   client:
     register-with-eureka: false

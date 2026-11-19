@@ -47,3 +47,39 @@ class OrderRow(Base):
     recipient_address: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     items: Mapped[list] = mapped_column(JSON, nullable=False)
+
+
+class UserRow(Base):
+    __tablename__ = "users"
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    is_active: Mapped[bool] = mapped_column(nullable=False, default=True)
+
+
+class ShipmentRow(Base):
+    __tablename__ = "shipments"
+    __table_args__ = (
+        CheckConstraint("weight_kg > 0", name="shipment_positive_weight"),
+        CheckConstraint("status IN ('NEW','READY','HANDED_OVER','CANCELLED')", name="shipment_valid_status"),
+    )
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    order_id: Mapped[UUID] = mapped_column(Uuid, unique=True, nullable=False)
+    carrier: Mapped[str] = mapped_column(String, nullable=False)
+    weight_kg: Mapped[float] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    handed_over_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    notification_pending: Mapped[bool] = mapped_column(nullable=False, default=False)
+
+
+class OrderDispatchRow(Base):
+    __tablename__ = "order_dispatches"
+    order_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    shipment_id: Mapped[UUID] = mapped_column(Uuid, unique=True, nullable=False)
+
+
+class ReservationBatchRow(Base):
+    __tablename__ = "reservation_batches"
+    order_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    items: Mapped[list] = mapped_column(JSON, nullable=False)

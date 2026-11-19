@@ -7,6 +7,8 @@ from pydantic import ValidationError
 
 from app.models.order import Order, OrderCreate
 from app.models.stock import Stock
+from app.models.shipment import DispatchRequest
+from app.security import forwarded_headers, require_roles
 from app.services.orders import OrderService
 
 
@@ -20,17 +22,17 @@ def get_order_service(request: Request) -> OrderService:
 OrderServiceDep = Annotated[OrderService, Depends(get_order_service)]
 
 
-@router.post("", response_model=Order, status_code=201)
+@router.post("", response_model=Order, status_code=201, dependencies=[Depends(require_roles("WAREHOUSE"))])
 def create_order(body: OrderCreate, service: OrderServiceDep) -> Order:
     return service.create(body)
 
 
-@router.get("", response_model=list[Order])
+@router.get("", response_model=list[Order], dependencies=[Depends(require_roles("WAREHOUSE"))])
 def list_orders(service: OrderServiceDep) -> list[Order]:
     return service.list()
 
 
-@router.get("/stock-check/{stock_id}")
+@router.get("/stock-check/{stock_id}", dependencies=[Depends(require_roles("WAREHOUSE"))])
 async def check_stock(stock_id: UUID, request: Request):
     discovery = request.app.state.eureka_client
     if discovery is None:
@@ -38,7 +40,7 @@ async def check_stock(stock_id: UUID, request: Request):
     try:
         payload = await discovery.do_service(
             "INVENTORY-SERVICE", f"/stocks/{stock_id}",
-            return_type="json", prefer_ip=True, timeout=3,
+            return_type="json", prefer_ip=True, timeout=3, **({"headers": forwarded_headers(request)} if request.headers.get("authorization") else {}),
         )
         stock = Stock.model_validate(payload)
         if stock.id != stock_id:
@@ -55,13 +57,29 @@ async def check_stock(stock_id: UUID, request: Request):
     return {"stock": stock, "available_quantity": stock.quantity - reserved}
 
 
-@router.get("/{order_id}", response_model=Order)
+@router.get("/{order_id}", response_model=Order, dependencies=[Depends(require_roles("WAREHOUSE"))])
 def get_order(order_id: UUID, response: Response, service: OrderServiceDep) -> Order:
     result, source = service.get(order_id)
     response.headers["X-Cache"] = source
     return result
 
 
-@router.post("/{order_id}/pack", response_model=Order)
+@router.post("/{order_id}/pack", response_model=Order, dependencies=[Depends(require_roles("WAREHOUSE"))])
 def pack_order(order_id: UUID, service: OrderServiceDep) -> Order:
     return service.pack(order_id)
+
+
+@router.post("/{order_id}/reserve", response_model=Order, dependencies=[Depends(require_roles("WAREHOUSE"))])
+async def reserve_order(order_id: UUID, request: Request, service: OrderServiceDep):
+    return await service.reserve(order_id, request.app.state.eureka_client, forwarded_headers(request))
+
+
+@router.get("/{order_id}/shipping-check", response_model=Order, dependencies=[Depends(require_roles("SHIPPING"))])
+def shipping_check(order_id: UUID, service: OrderServiceDep):
+    # Decyzja o wysyłce zawsze czyta bazę, nie potencjalnie nieaktualny cache.
+    return service.repository.get(order_id)
+
+
+@router.post("/{order_id}/dispatch", response_model=Order, dependencies=[Depends(require_roles("SHIPPING"))])
+def dispatch(order_id: UUID, body: DispatchRequest, service: OrderServiceDep):
+    return service.dispatch(order_id, body.shipment_id)

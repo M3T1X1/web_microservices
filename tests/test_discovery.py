@@ -37,7 +37,7 @@ def outbound(tmp_path):
     discovery = FakeEureka()
     app = create_outbound_app(
         outbound_database_url=f"sqlite:///{tmp_path}/outbound.db",
-        redis_client=ControlledRedis(), eureka_client=discovery,
+        redis_client=ControlledRedis(), eureka_client=discovery, auth_enabled=False,
     )
     with TestClient(app) as client:
         assert discovery.started
@@ -86,13 +86,13 @@ def test_invalid_uuid_does_not_call_inventory(outbound):
 
 def test_separate_process_apps_only_initialize_owned_data(tmp_path):
     for domain, factory, own_routes, foreign_route, tables in [
-        ("inventory", create_inventory_app, ("/stocks", "/receipts"), "/orders", {"stocks", "receipts"}),
-        ("outbound", create_outbound_app, ("/orders",), "/stocks", {"orders"}),
+        ("inventory", create_inventory_app, ("/stocks", "/receipts"), "/orders", {"stocks", "receipts", "reservation_batches"}),
+        ("outbound", create_outbound_app, ("/orders",), "/stocks", {"orders", "order_dispatches"}),
     ]:
         discovery = FakeEureka()
         inventory_db, outbound_db = tmp_path / f"{domain}-i.db", tmp_path / f"{domain}-o.db"
         app = factory(database_url=f"sqlite:///{inventory_db}", outbound_database_url=f"sqlite:///{outbound_db}",
-                      redis_client=ControlledRedis(), eureka_client=discovery)
+                      redis_client=ControlledRedis(), eureka_client=discovery, auth_enabled=False)
         with TestClient(app) as client:
             assert all(client.get(route).status_code == 200 for route in own_routes)
             assert client.get(foreign_route).status_code == 404

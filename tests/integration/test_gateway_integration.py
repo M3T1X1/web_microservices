@@ -1,40 +1,14 @@
 """Wyłącznie prawdziwe HTTP przez bramkę; dane przygotowywane przez API Inventory."""
-import os
 from uuid import uuid4
 
-import httpx
 import pytest
 
 pytestmark = pytest.mark.integration
 
 
-@pytest.fixture
-def gateway_client():
-    with httpx.Client(base_url=os.getenv("GATEWAY_URL", "http://127.0.0.1:8080"),
-                      timeout=10, trust_env=False) as client:
-        yield client
-
-
 def assert_gateway(response, status=200):
     assert response.status_code == status, response.text
     assert response.headers.get("x-gateway") == "lab4"
-
-
-@pytest.fixture
-def stock(gateway_client):
-    # Unikalna dostawa: powtórzenie testów nie zmienia zapasów użytkownika.
-    sku = f"LAB4-{uuid4().hex}"
-    response = gateway_client.post("/api/receipts", json={
-        "supplier": "Test integracyjny LAB4",
-        "items": [{"sku": sku, "target_location": "LAB4-TEST", "quantity_received": 10}],
-    })
-    assert_gateway(response, 201)
-    path = f"/api/receipts/{response.json()['id']}"
-    assert_gateway(gateway_client.post(f"{path}/accept"))
-    assert_gateway(gateway_client.post(f"{path}/post"))
-    response = gateway_client.get("/api/stocks")
-    assert_gateway(response)
-    return next(item for item in response.json() if item["sku"] == sku)
 
 
 def test_inventory_read_has_gateway_and_cache_headers(gateway_client, stock):

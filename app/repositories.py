@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.db_models import OrderRow, ReceiptRow, StockRow
+from app.db_models import OrderDispatchRow, OrderRow, ReceiptRow, StockRow
 from app.models.order import Order, OrderCreate
 from app.models.receipt import Receipt, ReceiptCreate
 from app.models.stock import Reservation, Stock, StockUpdate
@@ -186,6 +186,33 @@ class OrderRepository:
             if row.status != "RESERVED":
                 raise HTTPException(409, "Order must be reserved before packing")
             row.status = "PACKED"
+            result = order_payload(row)
+        return result
+
+    def mark_reserved(self, order_id):
+        with write_transaction(self.sessions) as db:
+            row = self._find(db, order_id, lock=True)
+            if row.status not in {"NEW", "RESERVED"}:
+                raise HTTPException(409, "Order cannot be reserved in its current state")
+            row.status = "RESERVED"
+            result = order_payload(row)
+        return result
+
+    def dispatch(self, order_id, shipment_id):
+        with write_transaction(self.sessions) as db:
+            row = self._find(db, order_id, lock=True)
+            existing = db.get(OrderDispatchRow, order_id)
+            if existing is not None:
+                if existing.shipment_id != shipment_id:
+                    raise HTTPException(409, "Order was dispatched with another shipment")
+                return order_payload(row)
+            if row.status != "PACKED":
+                raise HTTPException(409, "Order must be packed before dispatch")
+            if db.scalar(select(OrderDispatchRow.order_id).where(
+                    OrderDispatchRow.shipment_id == shipment_id)) is not None:
+                raise HTTPException(409, "Shipment is already assigned to another order")
+            row.status = "SHIPPED"
+            db.add(OrderDispatchRow(order_id=order_id, shipment_id=shipment_id))
             result = order_payload(row)
         return result
 

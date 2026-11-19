@@ -14,6 +14,7 @@ def app_factory(tmp_path):
             "redis_client": ControlledRedis(),
             "cache_prefix": f"lab2:test:{tmp_path.name}:warehouse",
             "cache_ttl": 60,
+            "auth_enabled": False,
         }
         options.update(kwargs)
         return create_app(**options)
