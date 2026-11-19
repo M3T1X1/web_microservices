@@ -26,7 +26,6 @@ class ReceiptService:
 
     def post(self, receipt_id: UUID) -> Receipt:
         receipt, stock_ids = self.repository.post(receipt_id)
-        # Repozytorium zatwierdziło już całą dostawę oraz zmiany stanów.
         for stock_id in stock_ids:
             self.stock_cache.delete(stock_id)
         return receipt
