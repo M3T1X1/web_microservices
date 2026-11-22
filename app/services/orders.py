@@ -1,16 +1,41 @@
 from uuid import UUID
 from urllib.error import HTTPError, URLError
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.cache import JsonCache
 from app.models.order import Order, OrderCreate
+from app.models.events import OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY, ShipmentHandedOver
+from app.messaging import BrokerUnavailableError, RabbitEventBroker
 from app.repositories import OrderRepository
 from app.services.cached_read import cached_read
 
 
 class OrderService:
-    def __init__(self, repository: OrderRepository, cache: JsonCache):
+    def __init__(self, repository: OrderRepository, cache: JsonCache, event_broker=None):
         self.repository, self.cache = repository, cache
+        self.event_broker = event_broker if event_broker is not None else RabbitEventBroker()
+
+    def consume_events(self, limit=50):
+        unique = 0
+
+        def handle_event(payload):
+            nonlocal unique
+            event = ShipmentHandedOver.model_validate(payload)
+            applied = self.repository.apply_shipment_event(event)
+            # Takze duplikat naprawia cache, jesli poprzednia proba padla po COMMIT.
+            if not self.cache.delete(event.order_id):
+                raise HTTPException(503, "Cache invalidation failed; event remains queued")
+            unique += int(applied)
+
+        try:
+            self.event_broker.bind_queue(OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY)
+            consumed = self.event_broker.consume_available(OUTBOUND_SHIPMENT_QUEUE, handle_event, limit=limit)
+        except BrokerUnavailableError as exc:
+            raise HTTPException(503, "RabbitMQ broker is unavailable") from exc
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise HTTPException(422, "Invalid shipment event; message remains queued") from exc
+        return {"consumed_messages": consumed, "unique_events_processed": unique}
 
     def create(self, body: OrderCreate) -> Order:
         return self.repository.create(body)

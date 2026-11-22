@@ -18,6 +18,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 SERVICE_PORTS = {"inventory": 8101, "outbound": 8102, "shipping": 8103, "auth": 8104}
 START_ORDER = ("auth", "inventory", "outbound", "shipping")
 sys.path.insert(0, str(PROJECT_DIR))
+from app.messaging import BrokerUnavailableError, RabbitEventBroker
 
 
 def port_number(value):
@@ -217,6 +218,14 @@ def redis_ready(url):
         return False
 
 
+def rabbitmq_ready(environment):
+    try:
+        return RabbitEventBroker(amqp_url=environment.get("RABBITMQ_URL"),
+                                 exchange_name=environment.get("RABBITMQ_EXCHANGE")).ping()
+    except BrokerUnavailableError:
+        return False
+
+
 def run(service, port):
     os.chdir(PROJECT_DIR)
     environment = load_environment()
@@ -228,19 +237,23 @@ def run(service, port):
     maven = require_maven(environment) if service == "all" else None
     prepare_auth(environment, "auth" in selected)
     processes = Processes()
-    redis_started = False
+    started_containers = []
     compose = ["docker", "compose", "-f", str(PROJECT_DIR / "compose.yaml")]
     try:
         if service == "all":
-            redis_url = environment.get("REDIS_URL", "redis://127.0.0.1:6379/0")
             if not shutil.which("docker"):
                 raise RuntimeError("Do startu calego systemu zainstaluj i uruchom Docker Desktop.")
-            # Redis uruchamiamy przez Compose; dzialajacy kontener pozostaje po zamknieciu skryptu.
-            existing = subprocess.run([*compose, "ps", "--status", "running", "-q", "redis"],
-                                      capture_output=True, text=True, env=environment, check=True)
-            redis_started = not existing.stdout.strip()
-            subprocess.run([*compose, "up", "-d", "redis"], env=environment, check=True)
-            wait_until("Redis", lambda: redis_ready(redis_url), processes, timeout=30)
+            redis_url = environment.get("REDIS_URL", "redis://127.0.0.1:6379/0")
+            for name, ready, timeout in (
+                ("redis", lambda: redis_ready(redis_url), 30),
+                ("rabbitmq", lambda: rabbitmq_ready(environment), 90),
+            ):
+                existing = subprocess.run([*compose, "ps", "--status", "running", "-q", name],
+                                          capture_output=True, text=True, env=environment, check=True)
+                if not existing.stdout.strip():
+                    started_containers.append(name)
+                subprocess.run([*compose, "up", "-d", name], env=environment, check=True)
+                wait_until(name, ready, processes, timeout=timeout)
             processes.start("eureka", [maven, "-f", "eureka-server/pom.xml", "spring-boot:run"], environment)
         with httpx.Client(timeout=2, trust_env=False) as client:
             eureka_url = f"http://127.0.0.1:{eureka_port}"
@@ -262,14 +275,18 @@ def run(service, port):
                 print(f"Gateway: {gateway_url}; Eureka: {eureka_url}", flush=True)
             else:
                 print("Uruchomiono jedna usluge; pozostala infrastruktura musi dzialac osobno.", flush=True)
+            if service == "all":
+                print("RabbitMQ Management: http://127.0.0.1:15672 (guest/guest)", flush=True)
             print("Gotowe. Zatrzymanie: Ctrl+C. Logi: .local/logs/", flush=True)
             while True:
                 processes.check()
                 time.sleep(0.5)
     finally:
-        processes.stop()
-        if redis_started:
-            subprocess.run([*compose, "stop", "redis"], env=environment, check=False)
+        try:
+            processes.stop()
+        finally:
+            for name in reversed(started_containers):
+                subprocess.run([*compose, "stop", name], env=environment, check=False)
 
 
 def interrupt(*_):

@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.db_models import OrderDispatchRow, OrderRow, ReceiptRow, StockRow
+from app.db_models import OrderDispatchRow, OrderRow, ProcessedEventRow, ReceiptRow, StockRow
 from app.models.order import Order, OrderCreate
 from app.models.receipt import Receipt, ReceiptCreate
 from app.models.stock import Reservation, Stock, StockUpdate
@@ -200,21 +200,34 @@ class OrderRepository:
 
     def dispatch(self, order_id, shipment_id):
         with write_transaction(self.sessions) as db:
-            row = self._find(db, order_id, lock=True)
-            existing = db.get(OrderDispatchRow, order_id)
-            if existing is not None:
-                if existing.shipment_id != shipment_id:
-                    raise HTTPException(409, "Order was dispatched with another shipment")
-                return order_payload(row)
-            if row.status != "PACKED":
-                raise HTTPException(409, "Order must be packed before dispatch")
-            if db.scalar(select(OrderDispatchRow.order_id).where(
-                    OrderDispatchRow.shipment_id == shipment_id)) is not None:
-                raise HTTPException(409, "Shipment is already assigned to another order")
-            row.status = "SHIPPED"
-            db.add(OrderDispatchRow(order_id=order_id, shipment_id=shipment_id))
-            result = order_payload(row)
-        return result
+            return self._dispatch(db, order_id, shipment_id)
+
+    def apply_shipment_event(self, event):
+        payload = event.model_dump(mode="json")
+        with write_transaction(self.sessions) as db:
+            previous = db.get(ProcessedEventRow, event.event_id)
+            if previous is not None:
+                if previous.payload != payload:
+                    raise HTTPException(409, "Event ID already processed with different data")
+                return False
+            self._dispatch(db, event.order_id, event.shipment_id)
+            db.add(ProcessedEventRow(event_id=event.event_id, event_type=event.event_type, payload=payload))
+        return True
+
+    def _dispatch(self, db, order_id, shipment_id):
+        row = self._find(db, order_id, lock=True)
+        existing = db.get(OrderDispatchRow, order_id)
+        if existing is not None:
+            if existing.shipment_id != shipment_id:
+                raise HTTPException(409, "Order was dispatched with another shipment")
+            return order_payload(row)
+        if row.status != "PACKED":
+            raise HTTPException(409, "Order must be packed before dispatch")
+        if db.scalar(select(OrderDispatchRow.order_id).where(OrderDispatchRow.shipment_id == shipment_id)) is not None:
+            raise HTTPException(409, "Shipment is already assigned to another order")
+        row.status = "SHIPPED"
+        db.add(OrderDispatchRow(order_id=order_id, shipment_id=shipment_id))
+        return order_payload(row)
 
     @staticmethod
     def _find(db, order_id, lock=False):

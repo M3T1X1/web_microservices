@@ -244,7 +244,7 @@ def test_fresh_databases_create_tables_and_unique_stock_index(app_factory, tmp_p
         assert (tmp_path / "outbound.db").exists()
         inventory = inspect(client.app.state.engine)
         assert inventory.get_table_names() == ["receipts", "reservation_batches", "stocks"]
-        assert inspect(client.app.state.outbound_engine).get_table_names() == ["order_dispatches", "orders"]
+        assert inspect(client.app.state.outbound_engine).get_table_names() == ["order_dispatches", "orders", "processed_events"]
         stock = client.get("/stocks").json()[0]
         assert UUID(stock["id"]).version == 4
         assert stock["quantity"] == 10 and stock["reservations"] == []

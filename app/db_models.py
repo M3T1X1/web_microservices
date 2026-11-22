@@ -83,3 +83,10 @@ class ReservationBatchRow(Base):
     __tablename__ = "reservation_batches"
     order_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     items: Mapped[list] = mapped_column(JSON, nullable=False)
+
+
+class ProcessedEventRow(Base):
+    __tablename__ = "processed_events"
+    event_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
