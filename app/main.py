@@ -132,6 +132,3 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
         })
 
     return app
-
-
-app = create_app()

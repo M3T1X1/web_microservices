@@ -2,15 +2,22 @@
 set -euo pipefail
 
 usage() {
-    echo "Uzycie: bash scripts/setup.sh [--port 8101] [--test] [--setup-only]"
+    echo "Uzycie: bash scripts/setup.sh [--service all|inventory|outbound|shipping|auth] [--port PORT] [--test] [--setup-only]"
+    echo "Bez --service: caly system. --port dotyczy tylko jednej wybranej uslugi."
 }
 
-port=8101
+service=all
+port=""
 run_tests=false
 setup_only=false
 
 while (($#)); do
     case "$1" in
+        --service)
+            if (($# < 2)); then usage >&2; exit 1; fi
+            service="$2"
+            shift 2
+            ;;
         --port)
             if (($# < 2)); then
                 usage >&2
@@ -26,25 +33,31 @@ while (($#)); do
     esac
 done
 
-if [[ ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || ((port > 65535)); then
+case "$service" in
+    all|inventory|outbound|shipping|auth) ;;
+    *) echo "Nieznana usluga: $service" >&2; usage >&2; exit 1 ;;
+esac
+if [[ -n "$port" ]] && { [[ ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || ((port > 65535)); }; then
     echo "Port musi byc liczba od 1 do 65535." >&2
+    exit 1
+fi
+if [[ "$service" == all && -n "$port" ]]; then
+    echo "--port wymaga wybrania jednej uslugi przez --service." >&2
     exit 1
 fi
 
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd -- "$project_dir"
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "Zainstaluj Pythona: sudo apt update && sudo apt install python3 python3-venv" >&2
-    exit 1
-fi
-
-if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))'; then
-    echo "Wymagany Python 3.12 lub nowszy." >&2
-    exit 1
-fi
-
 if [[ ! -d .venv ]]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "Zainstaluj Pythona: sudo apt update && sudo apt install python3 python3-venv" >&2
+        exit 1
+    fi
+    if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))'; then
+        echo "Wymagany Python 3.12 lub nowszy." >&2
+        exit 1
+    fi
     if ! python3 -m venv .venv; then
         echo "Nie udalo sie utworzyc .venv. W Debianie zainstaluj: sudo apt install python3-venv" >&2
         echo "Po naprawie usun niepelne .venv i uruchom skrypt ponownie." >&2
@@ -65,9 +78,10 @@ if "$run_tests"; then
 fi
 
 if "$setup_only"; then
-    echo "Instalacja zakonczona. Aby uruchomic serwer: bash scripts/setup.sh"
+    echo "Instalacja zakonczona. Caly system: bash scripts/setup.sh; jedna usluga: bash scripts/setup.sh --service inventory"
     exit 0
 fi
 
-echo "Dokumentacja: http://127.0.0.1:$port/docs | Zatrzymanie: Ctrl+C"
-exec "$venv_python" -m uvicorn app.main:app --host 127.0.0.1 --port "$port"
+server_arguments=(scripts/run_services.py --service "$service")
+if [[ -n "$port" ]]; then server_arguments+=(--port "$port"); fi
+exec "$venv_python" "${server_arguments[@]}"
