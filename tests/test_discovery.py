@@ -11,6 +11,39 @@ from app.outbound import create_outbound_app
 from tests.fakes import ControlledRedis
 
 
+@pytest.mark.parametrize("domain,port", [("inventory", 8101), ("outbound", 8102), ("shipping", 8103), ("auth", 8104)])
+def test_eureka_registration_has_service_addresses(monkeypatch, domain, port):
+    from app import discovery
+
+    for name in ("INSTANCE_IP", "INSTANCE_HOST", "SERVICE_PORT", "EUREKA_SERVER_URL"):
+        monkeypatch.delenv(name, raising=False)
+    captured = {}
+    monkeypatch.setattr(discovery, "EurekaClient", lambda **kwargs: captured.update(kwargs))
+    discovery.create_eureka_client(domain)
+    assert captured["instance_ip"] == "127.0.0.1"
+    assert captured["instance_host"] == "localhost"
+    assert captured["instance_port"] == port
+    assert captured["app_name"] == f"{domain.upper()}-SERVICE"
+    assert (captured["home_page_url"], captured["status_page_url"], captured["health_check_url"]) == ("/docs", "/ready", "/health")
+    assert captured["should_discover"] == (domain in {"outbound", "shipping"})
+
+
+def test_eureka_registration_uses_configured_instance(monkeypatch):
+    from app import discovery
+
+    monkeypatch.setenv("INSTANCE_IP", "192.168.1.20")
+    monkeypatch.setenv("INSTANCE_HOST", "warehouse.local")
+    monkeypatch.setenv("SERVICE_PORT", "8120")
+    monkeypatch.setenv("EUREKA_SERVER_URL", "http://registry.local:8761")
+    captured = {}
+    monkeypatch.setattr(discovery, "EurekaClient", lambda **kwargs: captured.update(kwargs))
+    discovery.create_eureka_client("outbound")
+    assert captured["instance_ip"] == "192.168.1.20"
+    assert captured["instance_host"] == "warehouse.local"
+    assert captured["instance_port"] == 8120
+    assert captured["eureka_server"] == "http://registry.local:8761"
+
+
 class FakeEureka:
     def __init__(self):
         self.started = self.stopped = False
