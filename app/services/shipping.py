@@ -5,10 +5,13 @@ from uuid import uuid4
 from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
 
 from app.db_models import ShipmentRow
 from app.models.order import Order
 from app.models.shipment import Shipment
+from app.models.events import SHIPMENT_ROUTING_KEY, ShipmentHandedOver
+from app.messaging import BrokerUnavailableError, RabbitEventBroker
 from app.repositories import write_transaction
 
 
@@ -19,8 +22,9 @@ def shipment_payload(row):
 
 
 class ShippingService:
-    def __init__(self, sessions, discovery):
+    def __init__(self, sessions, discovery, event_broker=None):
         self.sessions, self.discovery = sessions, discovery
+        self.event_broker = event_broker if event_broker is not None else RabbitEventBroker()
 
     async def call_outbound(self, path, headers, **kwargs):
         if self.discovery is None:
@@ -98,11 +102,7 @@ class ShippingService:
             row.status = "HANDED_OVER"
             row.handed_over_at = datetime.now(timezone.utc).isoformat()
             row.notification_pending = True
-        try:
-            return await self.sync(shipment_id, headers)
-        except HTTPException:
-            # Fakt fizycznego wydania pozostaje zapisany; klient widzi pending=True.
-            return self.get(shipment_id)
+        return await self.sync(shipment_id, headers)
 
     async def sync(self, shipment_id, headers):
         shipment = self.get(shipment_id)
@@ -110,10 +110,12 @@ class ShippingService:
             raise HTTPException(409, "Only HANDED_OVER shipments can be synchronized")
         if not shipment.notification_pending:
             return shipment
-        result = await self.call_outbound(f"/orders/{shipment.order_id}/dispatch", headers,
-                                          method="POST", data={"shipment_id": str(shipment.id)})
-        if not isinstance(result, dict) or result.get("id") != str(shipment.order_id) or result.get("status") != "SHIPPED":
-            raise HTTPException(502, "Outbound Service returned invalid dispatch confirmation")
+        event = ShipmentHandedOver.from_shipment(shipment)
+        try:
+            await run_in_threadpool(self.event_broker.publish, SHIPMENT_ROUTING_KEY, event.model_dump(mode="json"))
+        except BrokerUnavailableError as exc:
+            # Fakt wydania zostal zapisany; /sync ponowi publikacje tego samego event_id.
+            raise HTTPException(503, "RabbitMQ broker is unavailable") from exc
         with write_transaction(self.sessions) as db:
             row = self.find(db, shipment_id)
             row.notification_pending = False

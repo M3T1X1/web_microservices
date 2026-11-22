@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.messaging import InMemoryEventBroker
 from tests.fakes import ControlledRedis
 
 
@@ -15,6 +16,7 @@ def app_factory(tmp_path):
             "cache_prefix": f"lab2:test:{tmp_path.name}:warehouse",
             "cache_ttl": 60,
             "auth_enabled": False,
+            "event_broker": InMemoryEventBroker(),
         }
         options.update(kwargs)
         return create_app(**options)

@@ -15,6 +15,7 @@ from app.auth import create_auth_app
 from app.database import Base, make_database
 from app.db_models import UserRow
 from app.main import create_app
+from app.messaging import BrokerUnavailableError, InMemoryEventBroker
 from app.models.user import Role, UserCreate
 from app.security import TokenVerifier, issue_token
 from app.services.auth import AuthService
@@ -36,7 +37,6 @@ class Bridge:
         self.clients = {}
         self.calls = []
         self.errors = {}
-        self.lose_dispatch_response = False
         self.lose_reservation_response = False
 
     async def do_service(self, name, path, **kwargs):
@@ -52,8 +52,6 @@ class Bridge:
             raise HTTPError(path, response.status_code, response.text, response.headers, None)
         if path == "/reservations" and self.lose_reservation_response:
             raise URLError("Lost response after successful reservation")
-        if path.endswith("/dispatch") and self.lose_dispatch_response:
-            raise URLError("Lost response after successful commit")
         return response.json()
 
 
@@ -61,8 +59,9 @@ class Bridge:
 def world(tmp_path, keys):
     private, verifier = keys
     bridge = Bridge()
+    broker = InMemoryEventBroker()
     auth = create_auth_app(database_url=f"sqlite:///{tmp_path}/auth.db", private_key=private,
-                           token_verifier=verifier, discovery_enabled=False)
+                           token_verifier=verifier, discovery_enabled=False, event_broker=broker)
     with ExitStack() as stack:
         clients = {"auth": stack.enter_context(TestClient(auth))}
         admin = auth.state.auth_service.create_user(UserCreate(email="admin@example.com", password=PASSWORD,
@@ -71,7 +70,7 @@ def world(tmp_path, keys):
             app = create_app(domain=domain, database_url=f"sqlite:///{tmp_path}/inventory.db",
                              outbound_database_url=f"sqlite:///{tmp_path}/outbound.db",
                              shipping_database_url=f"sqlite:///{tmp_path}/shipping.db", auth_enabled=True,
-                             token_verifier=verifier, redis_client=ControlledRedis(), eureka_client=bridge)
+                             token_verifier=verifier, redis_client=ControlledRedis(), eureka_client=bridge, event_broker=broker)
             clients[domain] = stack.enter_context(TestClient(app))
             bridge.clients[f"{domain.upper()}-SERVICE"] = clients[domain]
         tokens = {}
@@ -196,6 +195,9 @@ def test_complete_order_and_shipping_flow_and_duplicate_dispatch(world):
     assert result.json()["status"] == "HANDED_OVER"
     assert result.json()["handed_over_at"] is not None
     assert result.json()["notification_pending"] is False
+    assert clients['outbound'].get(order_path, headers=tokens['WAREHOUSE']).json()['status'] == 'PACKED'
+    consumed = clients['outbound'].post('/orders/consume-events', headers=headers)
+    assert consumed.json() == {'consumed_messages': 1, 'unique_events_processed': 1}
     read = clients['outbound'].get(order_path, headers=tokens['WAREHOUSE'])
     assert read.json()['status'] == 'SHIPPED' and read.headers['x-cache'] == 'MISS'
     assert shipping.post(path + "/hand-over", headers=headers).status_code == 409
@@ -208,23 +210,35 @@ def test_complete_order_and_shipping_flow_and_duplicate_dispatch(world):
     assert all(call[2].get("headers", {}).get("Authorization") for call in bridge.calls)
 
 
-def test_lost_dispatch_response_can_be_retried_without_double_dispatch(world):
-    clients, tokens, bridge, _ = world
+def test_lost_publish_confirmation_can_be_retried_without_double_dispatch(world, monkeypatch):
+    clients, tokens, _, _ = world
     order, shipment = new_shipment(world)
     client, headers = clients["shipping"], tokens["SHIPPING"]
     path = f"/shipments/{shipment['id']}"
     client.post(path + "/ready", headers=headers)
-    bridge.lose_dispatch_response = True
+    broker = client.app.state.event_broker
+    publish = broker.publish
+
+    def lost_confirmation(key, event):
+        publish(key, event)
+        raise BrokerUnavailableError("Lost broker confirmation")
+
+    monkeypatch.setattr(broker, 'publish', lost_confirmation)
     response = client.post(path + "/hand-over", headers=headers)
-    assert response.status_code == 200
-    assert response.json()["notification_pending"] is True
-    timestamp = response.json()["handed_over_at"]
-    assert clients["outbound"].get(f"/orders/{order['id']}", headers=tokens["WAREHOUSE"]).json()["status"] == "SHIPPED"
-    bridge.lose_dispatch_response = False
+    assert response.status_code == 503
+    pending = client.get(path, headers=headers).json()
+    assert pending["notification_pending"] is True
+    timestamp = pending["handed_over_at"]
+    assert clients["outbound"].get(f"/orders/{order['id']}", headers=tokens["WAREHOUSE"]).json()["status"] == "PACKED"
+    monkeypatch.setattr(broker, 'publish', publish)
     response = client.post(path + "/sync", headers=headers)
     assert response.status_code == 200
     assert response.json()["notification_pending"] is False
     assert response.json()["handed_over_at"] == timestamp
+    assert broker.published[0][1]['event_id'] == broker.published[1][1]['event_id']
+    consumed = clients['outbound'].post('/orders/consume-events', headers=headers)
+    assert consumed.json() == {'consumed_messages': 2, 'unique_events_processed': 1}
+    assert clients['outbound'].get(f"/orders/{order['id']}", headers=tokens['WAREHOUSE']).json()['status'] == 'SHIPPED'
 
 
 def test_shipping_enforces_packed_order_and_duplicate_shipment(world):

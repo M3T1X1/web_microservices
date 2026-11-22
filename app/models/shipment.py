@@ -17,7 +17,7 @@ class Shipment(ShipmentCreate):
     id: UUID
     status: Literal["NEW", "READY", "HANDED_OVER", "CANCELLED"]
     handed_over_at: datetime | None = None
-    notification_pending: bool = False
+    notification_pending: bool = Field(default=False, description="Oczekuje publikacji do RabbitMQ; false nie oznacza jeszcze odbioru przez Outbound.")
 
 
 class DispatchRequest(BaseModel):

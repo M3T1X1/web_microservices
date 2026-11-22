@@ -12,3 +12,4 @@ __pycache__/
 gateway/target/
 eureka-server/target/
 .local/
+reports/

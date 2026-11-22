@@ -73,6 +73,7 @@ def simulated_stack(monkeypatch):
     monkeypatch.setattr(startup, "http_ready", lambda *_: True)
     monkeypatch.setattr(startup, "registered", lambda *_: True)
     monkeypatch.setattr(startup, "redis_ready", lambda *_: True)
+    monkeypatch.setattr(startup, "rabbitmq_ready", lambda *_: True)
     monkeypatch.setattr(startup.shutil, "which", lambda *_: "docker")
     monkeypatch.setattr(startup.subprocess, "run", command_run)
     monkeypatch.setattr(startup.time, "sleep", lambda *_: startup.interrupt())
@@ -110,7 +111,7 @@ def test_failed_service_start_stops_previous_processes(simulated_stack, monkeypa
 
 
 @pytest.mark.parametrize("already_running", [False, True])
-def test_redis_is_stopped_only_when_started_here(simulated_stack, monkeypatch, already_running):
+def test_containers_are_stopped_only_when_started_here(simulated_stack, monkeypatch, already_running):
     _, commands = simulated_stack
     monkeypatch.setattr(startup.shutil, "which", lambda *_: "docker")
 
@@ -123,6 +124,8 @@ def test_redis_is_stopped_only_when_started_here(simulated_stack, monkeypatch, a
         startup.run("all", None)
     assert any("up" in command for command in commands)
     assert any("stop" in command for command in commands) == (not already_running)
+    stopped = [command[-1] for command in commands if "stop" in command]
+    assert stopped == ([] if already_running else ["rabbitmq", "redis"])
 
 
 def test_shutdown_terminates_real_child_process(tmp_path, monkeypatch):

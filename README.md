@@ -7,11 +7,11 @@ Zaimplementowane są **Inventory, Outbound, Shipping i Auth**. Każda usługa dz
 | Usługa | Plik startowy | Port | Baza / tabele | Odpowiedzialność |
 |---|---|---|---|---|
 | Inventory | `app/inventory.py` | 8101 | `inventory.db`: stocks, receipts, reservation_batches | Stany, przyjęcia, rezerwacje |
-| Outbound | `app/outbound.py` | 8102 | `outbound.db`: orders, order_dispatches | Zamówienia, rezerwowanie przez Inventory, pakowanie i potwierdzanie wysyłki |
-| Shipping | `app/shipping.py` | 8103 | `shipping.db`: shipments | Przesyłki, przygotowanie, wydanie kurierowi i powiadomienie Outbound |
+| Outbound | `app/outbound.py` | 8102 | `outbound.db`: orders, order_dispatches, processed_events | Zamówienia, rezerwowanie przez Inventory, pakowanie i potwierdzanie wysyłki |
+| Shipping | `app/shipping.py` | 8103 | `shipping.db`: shipments | Przesyłki, przygotowanie, wydanie kurierowi i zdarzenie dla Outbound przez RabbitMQ |
 | Auth | `app/auth.py` | 8104 | `auth.db`: users | Konta, Argon2id, logowanie, JWT RS256 i role |
 
-Gateway działa na :8080, Eureka na :8761, a Redis domyślnie na :6379. Auth nie korzysta z Redis. Shipping zapisuje i czyta przesyłki bez cache; wspólna fabryka inicjalizuje adapter Redis i uwzględnia go w `/ready`, lecz jego awaria nie blokuje operacji na przesyłkach.
+Gateway działa na :8080, Eureka na :8761, Redis na :6379, a RabbitMQ na :5672 (panel :15672). Auth nie korzysta z Redis. Shipping zapisuje i czyta przesyłki bez cache; wspólna fabryka inicjalizuje adapter Redis i uwzględnia go w `/ready`, lecz jego awaria nie blokuje operacji na przesyłkach. Wszystkie usługi mają dostęp do wspólnego adaptera RabbitMQ; obecnie używa go tylko zdarzenie Shipping → Outbound. Szczegóły w [LAB5](#lab5).
 
 ```mermaid
 flowchart TB
@@ -21,7 +21,9 @@ flowchart TB
     G --> S[Shipping :8103]
     G --> A[Auth :8104]
     O -->|HTTP z JWT: rezerwacja i odczyt| I
-    S -->|HTTP z JWT: PACKED i dispatch| O
+    S -->|HTTP z JWT: sprawdzenie PACKED| O
+    S -->|ShipmentHandedOver| B[RabbitMQ :5672]
+    B -->|ręczny odbiór w Outbound| O
     I --> ID[(inventory.db)]
     O --> OD[(outbound.db)]
     S --> SD[(shipping.db)]
@@ -43,9 +45,9 @@ Auth przechowuje wyłącznie hashe Argon2id. JWT zawiera identyfikator użytkown
 |---|---|
 | ADMIN | Wszystkie operacje, tworzenie kont i aktywowanie/dezaktywowanie użytkowników |
 | WAREHOUSE | Inventory i zwykłe operacje Outbound: zamówienia, rezerwowanie, pakowanie |
-| SHIPPING | Shipping oraz wąskie endpointy Outbound `/orders/{id}/shipping-check` i `/orders/{id}/dispatch` |
+| SHIPPING | Shipping oraz endpointy Outbound `/orders/{id}/shipping-check`, `/orders/{id}/dispatch` i `/orders/consume-events` |
 
-Gateway zachowuje domyślny timeout odpowiedzi 5 s, a trasa Shipping ma `metadata.response-timeout: 10000` (10 s). Wydanie kurierowi wykonuje dwa kolejne wywołania Outbound z timeoutem 3 s, więc wymaga większego budżetu niż pojedynczy odczyt. Testy HTTP mają limit 15 s.
+Gateway zachowuje domyślny timeout odpowiedzi 5 s, a trasa Shipping ma `metadata.response-timeout: 10000` (10 s). Wydanie kurierowi sprawdza PACKED przez HTTP z timeoutem 3 s, zapisuje wydanie i publikuje do RabbitMQ; nie czeka na przetworzenie zdarzenia przez Outbound. Testy HTTP mają limit 15 s.
 
 Brak lub błędny token daje 401; niewłaściwa rola 403. Kontrola działa również na bezpośrednich portach usług. `/health`, `/ready` i dokumentacja pozostają technicznie dostępne lokalnie. Auth sprawdza aktywność konta przy logowaniu i `/auth/me`, a także aktualną rolę administratora przy zarządzaniu kontami. Pozostałe usługi weryfikują JWT lokalnie: dezaktywowanie konta nie unieważnia natychmiast jego już wydanego tokenu, który może działać do `exp`. Zatrzymanie Auth nie blokuje operacji z ważnym tokenem. Nie dodano refresh tokenów, centralnej listy unieważnień ani limitowania prób logowania.
 
@@ -53,7 +55,7 @@ Kontrola JWT jest domyślnie włączona we wspólnej fabryce, również w trybie
 
 ### Przygotowanie i uruchomienie wszystkich usług
 
-Wymagania: Python 3.12+, JDK 21, Maven 3.9.x oraz działający Docker z Compose (na Windows Docker Desktop). Redis działa w kontenerze; Eureka i Gateway lokalnie przez Maven. `mvn -version` powinno wskazywać Javę 21 lub nowszą. Po instalacji narzędzi uruchom ponownie terminal i IDE.
+Wymagania: Python 3.12+, JDK 21, Maven 3.9.x oraz działający Docker z Compose (na Windows Docker Desktop). Redis i RabbitMQ działają w kontenerach; Eureka i Gateway lokalnie przez Maven. `mvn -version` powinno wskazywać Javę 21 lub nowszą. Po instalacji narzędzi uruchom ponownie terminal i IDE.
 
 Jeśli nie masz `.env`, skopiuj `.env.example` do `.env`. Nie kopiuj `.venv` z innego komputera.
 
@@ -77,9 +79,9 @@ bash scripts/setup.sh --service inventory
 bash scripts/setup.sh --service outbound --port 8120
 ```
 
-Bez wyboru usługi skrypt przygotowuje `.venv`, instaluje zależności i uruchamia Redis, Eurekę, Auth, Inventory, Outbound, Shipping oraz Gateway jako osobne procesy. Przy pierwszym starcie pyta o email i hasło administratora. `-Service` / `--service` wybiera `inventory`, `outbound`, `shipping` lub `auth`; port jest ustawiany również w konfiguracji Eureki. `-Port` / `--port` wymaga wybrania jednej usługi.
+Bez wyboru usługi skrypt przygotowuje `.venv`, instaluje zależności i uruchamia Redis, RabbitMQ, Eurekę, Auth, Inventory, Outbound, Shipping oraz Gateway. Przy pierwszym starcie pyta o email i hasło administratora. `-Service` / `--service` wybiera `inventory`, `outbound`, `shipping` lub `auth`; port jest ustawiany również w konfiguracji Eureki. `-Port` / `--port` wymaga wybrania jednej usługi.
 
-`-SetupOnly` / `--setup-only` tylko przygotowuje środowisko Pythona; `-Test` / `--test` dodatkowo uruchamia testy. Wspólna logika jest w `scripts/run_services.py`. Skrypt wczytuje `.env` (zmienne terminala mają pierwszeństwo), czeka na gotowość procesów i zapisuje logi do `.local/logs/`. `Ctrl+C` zatrzymuje uruchomione procesy oraz Redis, jeżeli kontener nie działał przed startem skryptu. Bazy i klucze pozostają zachowane.
+`-SetupOnly` / `--setup-only` tylko przygotowuje środowisko Pythona; `-Test` / `--test` dodatkowo uruchamia testy. Wspólna logika jest w `scripts/run_services.py`. Skrypt wczytuje `.env` (zmienne terminala mają pierwszeństwo), czeka na gotowość procesów i zapisuje logi do `.local/logs/`. `Ctrl+C` zatrzymuje uruchomione procesy oraz te kontenery Redis/RabbitMQ, które nie działały przed startem skryptu. Bazy, klucze i wolumen RabbitMQ pozostają zachowane.
 
 #### Start ręczny
 
@@ -97,8 +99,8 @@ python -m venv .venv
 Uruchom kolejno z głównego katalogu projektu; każdy serwer pierwszoplanowy w osobnym terminalu:
 
 ```powershell
-# 1. Redis w Dockerze
-docker compose up -d redis
+# 1. Redis i RabbitMQ w Dockerze
+docker compose up -d redis rabbitmq
 
 # 2. Eureka
 mvn -f eureka-server/pom.xml spring-boot:run
@@ -136,12 +138,14 @@ Przy ręcznym starcie na domyślnych portach `SERVICE_PORT` może pozostać nieu
 | `GATEWAY_EUREKA_URL` | `http://127.0.0.1:8761/eureka/` |
 | `REDIS_URL` | `redis://127.0.0.1:6379/0` |
 | `CACHE_PREFIX` / `CACHE_TTL_SECONDS` | `lab2:local:warehouse` / 60 |
+| `RABBITMQ_URL` | `amqp://guest:guest@127.0.0.1:5672/%2F` |
+| `RABBITMQ_EXCHANGE` | `warehouse.events` |
 
 `.env.example` jest wzorem. `.env` wczytują skrypty oraz ręczny Uvicorn z `--env-file .env`. Przy ręcznym starcie aplikacji Java ustaw zmienione wartości Eureki/Gateway w ich terminalach — Maven nie wczytuje `.env` automatycznie. Zmiana `INSTANCE_IP` / `INSTANCE_HOST` nie zmienia adresu nasłuchu Uvicorna. Pliki SQLite pozostają w katalogu roboczym; każdy proces tworzy tylko własne brakujące tabele.
 
 Poczekaj na cztery wpisy UP w Eurece i odświeżenie rejestrów klientów. Pierwsze wywołania mogą zwracać 503. Dokumentacje są pod `/docs` na portach 8101–8104. W Auth wykonaj `/auth/login`, a otrzymany `access_token` wklej w **Authorize** w dokumentacji wybranej usługi.
 
-Przy starcie ręcznym zatrzymuj serwery przez `Ctrl+C` w ich terminalach, a Redis przez `docker compose stop redis`. Zachowaj bazy i klucze.
+Przy starcie ręcznym zatrzymuj serwery przez `Ctrl+C` w ich terminalach, a Redis i RabbitMQ przez `docker compose stop redis rabbitmq`. Zachowaj bazy, klucze i wolumen brokera.
 
 ### Endpointy nowych usług i przepływ realizacji zamówienia
 
@@ -155,14 +159,15 @@ Poniżej ścieżki widziane przez klienta Gateway (:8080); `StripPrefix=1` usuwa
 | PATCH `/api/auth/users/{id}` | `{"is_active":false}` lub true; ostatni aktywny administrator nie może zostać wyłączony | ADMIN |
 | POST `/api/orders/{id}/reserve` | Rezerwacja wszystkich pozycji przez Inventory i status RESERVED | WAREHOUSE, ADMIN |
 | POST `/api/orders/{id}/pack` | RESERVED → PACKED | WAREHOUSE, ADMIN |
+| POST `/api/orders/consume-events` | Ręczny odbiór zdarzeń z RabbitMQ; domyślnie maksymalnie 50 | SHIPPING, ADMIN |
 | POST `/api/shipments` | order_id, carrier, weight_kg; nowe NEW, sukces 201 | SHIPPING, ADMIN |
 | GET `/api/shipments`, GET `/api/shipments/{id}` | Lista i szczegóły przesyłek | SHIPPING, ADMIN |
 | POST `/api/shipments/{id}/ready` | NEW → READY; sprawdza PACKED w Outbound | SHIPPING, ADMIN |
-| POST `/api/shipments/{id}/hand-over` | READY → HANDED_OVER, czas UTC i powiadomienie Outbound | SHIPPING, ADMIN |
+| POST `/api/shipments/{id}/hand-over` | READY → HANDED_OVER, czas UTC i publikacja zdarzenia do RabbitMQ | SHIPPING, ADMIN |
 | POST `/api/shipments/{id}/cancel` | NEW/READY → CANCELLED | SHIPPING, ADMIN |
-| POST `/api/shipments/{id}/sync` | Ponowienie oczekującego powiadomienia o wysyłce | SHIPPING, ADMIN |
+| POST `/api/shipments/{id}/sync` | Ponowienie oczekującej publikacji zdarzenia o wysyłce | SHIPPING, ADMIN |
 
-Shipping rejestruje przesyłkę wyłącznie dla istniejącego zamówienia PACKED i ponownie sprawdza stan przed przygotowaniem oraz wydaniem. Outbound udostępnia Shipping bezpośredni odczyt bazy (`/orders/{id}/shipping-check`), aby decyzja nie opierała się na potencjalnie starej kopii Redis. Powiadomienie `POST /orders/{id}/dispatch` zmienia PACKED → SHIPPED, zapisuje identyfikator przesyłki i unieważnia cache zamówienia. Ponowienie z tym samym shipment_id jest idempotentne, a inne shipment_id daje 409. Te dwa wąskie endpointy mają rolę SHIPPING/ADMIN; WAREHOUSE nie może sam oznaczyć zamówienia jako wysłanego.
+Shipping rejestruje przesyłkę wyłącznie dla istniejącego zamówienia PACKED i ponownie sprawdza stan przed przygotowaniem oraz wydaniem. Outbound udostępnia Shipping bezpośredni odczyt bazy (`/orders/{id}/shipping-check`), aby decyzja nie opierała się na potencjalnie starej kopii Redis. Po wydaniu Shipping publikuje `ShipmentHandedOver`. Dopiero ręczny odbiór w Outbound zmienia PACKED → SHIPPED, zapisuje identyfikator przesyłki i zdarzenia oraz usuwa cache zamówienia. Duplikaty są rozpoznawane po event_id. Dotychczasowe `POST /orders/{id}/dispatch` pozostaje zgodne z wcześniejszym API: ten sam shipment_id jest idempotentny, inny daje 409. Odczyt Shipping, dispatch i odbiór zdarzeń wymagają SHIPPING/ADMIN.
 
 Przykłady JSON:
 
@@ -174,22 +179,22 @@ Przykłady JSON:
 {"order_id":"UUID-spakowanego-zamowienia","carrier":"Firma kurierska","weight_kg":2.5}
 ```
 
-Każde żądanie domenowe wymaga `Authorization: Bearer <access_token>`. Gateway przekazuje ten nagłówek, a wywołania Outbound → Inventory i Shipping → Outbound zachowują token użytkownika oraz `Content-Type: application/json` przy wysyłaniu JSON. Bramka nie sprawdza reguł biznesowych i nie łączy się z bazami.
+Każde żądanie domenowe wymaga `Authorization: Bearer <access_token>`. Gateway przekazuje ten nagłówek, a wywołania HTTP Outbound → Inventory i Shipping → Outbound zachowują token użytkownika oraz `Content-Type: application/json` przy wysyłaniu JSON. Zdarzenie RabbitMQ nie zawiera tokenu; operacja uruchamiająca odbiór wymaga JWT. Bramka nie sprawdza reguł biznesowych i nie łączy się z bazami.
 
-Przykładowa kolejność przez Gateway: zaloguj administratora, utwórz pracownika WAREHOUSE i SHIPPING, utwórz zamówienie, wykonaj `/reserve`, `/pack`, utwórz przesyłkę, wykonaj `/ready` i `/hand-over`. Stan zamówienia kończy się na SHIPPED, przesyłki na HANDED_OVER.
+Przykładowa kolejność przez Gateway: zaloguj administratora, utwórz pracownika WAREHOUSE i SHIPPING, utwórz zamówienie, wykonaj `/reserve`, `/pack`, utwórz przesyłkę, wykonaj `/ready` i `/hand-over`, następnie `/orders/consume-events`. Dopiero po odbiorze zamówienie ma SHIPPED; przesyłka ma HANDED_OVER już po wydaniu kurierowi.
 
 Rezerwacja zbiorcza Inventory (`POST /reservations`, tylko port Inventory) obejmuje wszystkie SKU i lokalizacje w jednej transakcji. Brak towaru daje 409 i rollback całej operacji. Zapisuje żądanie według order_id, więc utracona odpowiedź lub ponowienie po błędzie zapisu Outbound nie rezerwuje towaru drugi raz. Zmienione pozycje pod tym samym order_id dają 409. Outbound nadaje RESERVED dopiero po poprawnym potwierdzeniu. Nie dodano zewnętrznej trasy `/api/reservations`; klient korzysta z operacji na zamówieniu.
 
-Wydanie kurierowi i wpis `notification_pending=true` są jedną transakcją Shipping. Potem usługa próbuje powiadomić Outbound. Jeżeli powiadomienie się nie powiedzie lub odpowiedź zostanie utracona, przesyłka pozostaje HANDED_OVER i odpowiedź zawiera `notification_pending=true`; nie cofamy zapisanego faktu wydania. Po przywróceniu połączenia wywołaj `/sync` z ważnym tokenem. Udane potwierdzenie ustawia false. To trwałe ponowienie sterowane API, bez brokera i bez automatycznego procesu w tle; stan oczekujący przetrwa restart.
+Wydanie kurierowi i wpis `notification_pending=true` są jedną transakcją Shipping. Potem usługa publikuje zdarzenie. Awaria RabbitMQ daje 503, ale przesyłka pozostaje HANDED_OVER z oczekującym powiadomieniem. Po przywróceniu brokera wywołaj `/sync` z ważnym tokenem: ponowi publikację z tym samym event_id. Potwierdzenie RabbitMQ ustawia false; oznacza przyjęcie wiadomości przez broker, a nie jej przetworzenie przez Outbound. Publikacja i odbiór nie mają automatycznego procesu w tle; stan oczekujący przetrwa restart.
 
 Ograniczenia: jedna przesyłka na zamówienie, także po jej anulowaniu; brak etykiet i numerów śledzenia. Rezerwacje po wysyłce pozostają zapisane w Inventory — nie dodano fizycznego rozchodu towaru ani zwalniania rezerwacji. Nie ma transakcji obejmującej dwie bazy; dlatego jawnie obsługujemy ponowienia i stan oczekującego powiadomienia. Nie dodano paczkomatów ani integracji z przewoźnikiem.
 
 ### Testy nowych usług
 
-Weryfikacja z 22.11.2026: **120 testów jednostkowych i komponentowych oraz 11 integracyjnych przeszło**. Eureka i Gateway zbudowały się poprawnie przy użyciu JDK 21 i Mavena. Pełny zestaw działał z Redis w Dockerze, cztery usługi miały status UP, a adresy `/docs`, `/ready` i `/health` w rejestrze były poprawne. Testy wykonano na odrębnych tymczasowych bazach i kluczach, po czym procesy zatrzymano.
+Weryfikacja z 22.11.2026: **131 testów jednostkowych i komponentowych oraz 12 integracyjnych przeszło**. Pełny zestaw działał z Redis i RabbitMQ w Dockerze oraz Eureką i Gateway na JDK 21/Maven. Sprawdzono publikację, odbiór, cache, duplikaty, awarię brokera i powrót wyłączonego Outbound. Testy wykonano na tymczasowych bazach, kluczach, prefiksie Redis i vhoście RabbitMQ, po czym zatrzymano własne procesy. Szczegóły i [raport](reports/lab5-verification.json) w [LAB5](#lab5).
 
 ```bash
-# Szybkie testy: SQLite, prawdziwe podpisy RSA, atrapy Redis i discovery
+# Szybkie testy: SQLite, podpisy RSA, atrapy Redis, RabbitMQ i discovery
 .venv/bin/python -m pytest -q
 .venv/bin/python -m pip check
 
@@ -199,15 +204,15 @@ export GATEWAY_TOKEN='<access_token>'
 
 ```
 
-W PowerShell token ustaw przez `$env:GATEWAY_TOKEN = '<access_token>'` i użyj `.\.venv\Scripts\python.exe`. Testy integracyjne tworzą unikalne SKU, zamówienia i konta; nie kasują baz użytkownika. Wymagają czterech usług, Gateway, Eureki i sprawnego Redis. `pytest.ini` pomija `tests/integration` podczas zwykłego uruchomienia; `-o addopts=` umożliwia ich osobne wykonanie.
+W PowerShell token ustaw przez `$env:GATEWAY_TOKEN = '<access_token>'` i użyj `.\.venv\Scripts\python.exe`. Integracje wymagają czterech usług, Gateway, Eureki, Redis i RabbitMQ oraz tych samych zmiennych brokera co aplikacje. Uruchamiaj je na odrębnych bazach, prefiksie Redis i vhoście RabbitMQ: tworzą dane, a odbiór przetwarza całą powiązaną kolejkę. `pytest.ini` pomija `tests/integration` podczas zwykłego uruchomienia; `-o addopts=` umożliwia ich osobne wykonanie.
 
-Nowe testy obejmują: hashe i brak haseł w odpowiedziach/walidacji, aktywność kont, unikalność emaila, role na bezpośrednich portach, JWT o złym podpisie/algorytmie/wystawcy/odbiorcy/czasie, atomowość rezerwacji, legalne przejścia statusów przesyłki, awarie zależności i utratę odpowiedzi po zatwierdzonym dispatch. W integracjach poprzednie siedem scenariuszy bramki działa z JWT, a cztery nowe sprawdzają Auth, role oraz pełny przepływ wysyłki.
+Testy obejmują hashe, role i JWT, atomowość rezerwacji, przejścia statusów przesyłki oraz awarie zależności. LAB5 dodaje publikację po zapisie, ręczny odbiór, duplikaty, ACK/NACK, utratę potwierdzenia publikacji i naprawę cache po ponowieniu. Integracje obejmują wcześniejsze scenariusze bramki/Auth/wysyłki oraz rzeczywisty duplikat RabbitMQ i unieważnienie Redis.
 
 Oficjalne źródła: [PyJWT — podpisy RSA i walidacja claims](https://pyjwt.readthedocs.io/en/stable/usage.html), użyte PyJWT 2.15.1; [argon2-cffi — PasswordHasher](https://argon2-cffi.readthedocs.io/en/stable/howto.html), użyte 25.1.0. Ich zastosowanie sprawdzono testami błędnych tokenów i logowania oraz rzeczywistym wywołaniem HTTP między usługami. Implementację i testy przygotował Codex na polecenie użytkownika; nie przypisujemy autorom projektu niepotwierdzonego udziału w tych zmianach.
 
 ## Dokumentacja historycznych etapów
 
-Sekcje LAB1/LAB2 i LAB4 zachowują opis wcześniejszych etapów. Określenia „planowane” i przykłady bez JWT dotyczą tamtego stanu projektu. Sekcja LAB3 została uzupełniona zgodnie z obecną implementacją. Do uruchamiania aktualnego kodu stosuj instrukcję na początku README.
+Sekcje LAB1/LAB2 i LAB4 zachowują opis wcześniejszych etapów. Określenia „planowane” i przykłady bez JWT dotyczą tamtego stanu projektu. Sekcja LAB3 opisuje discovery, a [LAB5](#lab5) obecne zdarzenie RabbitMQ. Do uruchamiania aktualnego kodu stosuj instrukcję na początku README.
 
 ## Uruchomienie i testy — historyczny tryb LAB1/LAB2
 
@@ -854,7 +859,7 @@ Zakres według [instrukcji LAB3](https://pawoom.lazysolutions.pl/2026_2027/lab3/
 | Usługa | Odpowiedzialność | Własne dane | Nazwa w Eurece | Port |
 |---|---|---|---|---|
 | Inventory | Stany, przyjęcia i rezerwacje | `inventory.db`: `stocks`, `receipts`, `reservation_batches` | `INVENTORY-SERVICE` | 8101 |
-| Outbound | Zamówienia, rezerwowanie przez Inventory i pakowanie | `outbound.db`: `orders`, `order_dispatches` | `OUTBOUND-SERVICE` | 8102 |
+| Outbound | Zamówienia, rezerwowanie przez Inventory i pakowanie | `outbound.db`: `orders`, `order_dispatches`, `processed_events` (LAB5) | `OUTBOUND-SERVICE` | 8102 |
 
 Każda usługa działa w osobnym procesie i otwiera wyłącznie swoją bazę. Outbound korzysta z API Inventory. Zachowano transakcje SQLite, cache-aside Redis, TTL i unieważnianie cache po zapisie z LAB2. Inbound pozostaje modułem Inventory. Aktualnie rejestrują się również `SHIPPING-SERVICE` (8103) i `AUTH-SERVICE` (8104).
 
@@ -898,7 +903,7 @@ flowchart LR
 
 ### Wyniki weryfikacji
 
-Weryfikacja z 22.11.2026: **120 testów automatycznych**, również wcześniejsze scenariusze LAB1/LAB2, oraz **11 integracyjnych** na rzeczywistym systemie. Osobno wykonano scenariusze LAB3 na tymczasowych bazach, kluczach i prefiksie cache:
+Weryfikacja warstwy LAB3 z 22.11.2026, przed dodaniem LAB5: **120 testów automatycznych**, również wcześniejsze scenariusze LAB1/LAB2, oraz **11 integracyjnych** na rzeczywistym systemie. Osobno wykonano scenariusze LAB3 na tymczasowych bazach, kluczach i prefiksie cache:
 
 | Scenariusz | Stan początkowy i żądanie | Oczekiwany wynik | Wynik rzeczywisty | Przywrócenie stanu |
 |---|---|---|---|---|
@@ -1165,3 +1170,134 @@ Dokumentacja online opisuje linię 5.0 i może wskazywać nowszy patch niż zale
 Autorzy projektu: **131427** — wcześniejszy deklarowany zakres Outbound/Redis; **131413** — wcześniejszy deklarowany zakres Inventory/SQLAlchemy. Dla LAB4 nie przypisujemy autorom niepotwierdzonych czynności. Implementację rozdzielenia procesów, adapter Eureki, konfigurację bramki, testy, skrypt eksperymentów i dokumentację przygotował Codex na polecenie użytkownika. Weryfikacja AI obejmowała przeczytanie instrukcji i źródeł, uruchomienie 73 wcześniejszych testów przed zmianami, 83 testów po zmianach, zbudowanie obu projektów Maven, 7 testów integracyjnych oraz rzeczywiste eksperymenty z zapisanym raportem. Każdy autor powinien samodzielnie przeanalizować konfigurację i przećwiczyć zmianę prefiksu przed odbiorem; nie deklarujemy, że taki odbiór już się odbył.
 
 Wersja do przekazania pozostaje w tym repozytorium. `.gitignore` wyklucza `.venv`, cache Pythona, lokalne bazy, `.env` i katalogi `target` obu projektów Maven. Nie utworzono automatycznie commita, tagu ani publikacji. Po przeglądzie można utworzyć commit etapu i tag `lab4` zgodnie z instrukcją; istniejącego tagu nie należy nadpisywać.
+
+<a id="lab5"></a>
+
+## 12. LAB5 — komunikacja przez RabbitMQ
+
+Wdrożono jedno zdarzenie: **Shipping informuje Outbound o wydaniu przesyłki kurierowi**. Rezerwacje Inventory nadal działają przez HTTP. Zachowano SQLite, Redis, Eurekę, Gateway i JWT z wcześniejszych etapów. Zakres według [instrukcji LAB5](https://pawoom.lazysolutions.pl/2026_2027/lab5/).
+
+### Kontrakt i przebieg
+
+| Element | Wartość i znaczenie |
+|---|---|
+| Producent | Shipping, `POST /api/shipments/{id}/hand-over` |
+| Zdarzenie | `ShipmentHandedOver` — fakt wydania kurierowi |
+| Exchange | `warehouse.events`, `topic`, `durable=True` |
+| Routing key | `shipment.handed_over` |
+| Kolejka | `outbound.shipment-events`, `durable=True` |
+| Konsument | Outbound, ręczne `POST /api/orders/consume-events?limit=50` |
+| Skutek | Zamówienie `PACKED` → `SHIPPED`, zapis `event_id`, usunięcie kopii z Redis |
+| Uprawnienia HTTP | SHIPPING lub ADMIN dla wydania, ponowienia publikacji i odbioru |
+
+Przykładowa wiadomość JSON:
+
+```json
+{
+  "event_id": "c9309d11-9d5c-59a9-bd43-51b8b808710d",
+  "event_type": "ShipmentHandedOver",
+  "shipment_id": "11111111-1111-4111-8111-111111111111",
+  "order_id": "22222222-2222-4222-8222-222222222222",
+  "occurred_at": "2026-11-22T20:00:00Z"
+}
+```
+
+`event_id` jest UUID wyliczanym z identyfikatora przesyłki i rodzaju zdarzenia. Ponowienie `/sync` po restarcie generuje ten sam identyfikator i czas wydania. Konsument sprawdza wymagane pola, a dodatkowe ignoruje (Tolerant Reader). Wiadomość nie przenosi haseł ani JWT.
+
+```mermaid
+flowchart TB
+    C[Klient z JWT] --> G[Gateway :8080]
+    G -->|hand-over| S[Shipping :8103]
+    S -->|HTTP: sprawdzenie PACKED| O[Outbound :8102]
+    S --> SD[(shipping.db: wydanie i notification_pending)]
+    S -->|ShipmentHandedOver| B[RabbitMQ :5672]
+    B --> Q[(outbound.shipment-events)]
+    G -->|orders/consume-events| O
+    Q -->|odbiór i ACK po przetworzeniu| O
+    O --> OD[(outbound.db: zamówienie i processed_events)]
+    O -->|DEL kopii zamówienia| R[(Redis :6379)]
+    S -. rejestracja i odkrywanie .-> E[Eureka :8761]
+    O -. rejestracja .-> E
+    G -. pobieranie rejestru .-> E
+```
+
+Odpowiedzi na pytania projektowe:
+
+1. **Dlaczego asynchronicznie?** Wydanie kurierowi już nastąpiło; Outbound może odnotować je później. Sprawdzenie PACKED przed wydaniem pozostaje synchroniczne przez Eurekę. Jest to choreografia zdarzeń, bez centralnego koordynatora Sagi.
+2. **Kiedy publikujemy?** Po walidacji i sprawdzeniu reguł Shipping zapisuje HANDED_OVER, czas i `notification_pending=true` w jednej transakcji. Dopiero po COMMIT publikuje persistent JSON. Po potwierdzeniu przyjęcia przez RabbitMQ zapisuje false. Błędy 404/409/422 nie publikują zdarzenia.
+3. **Co robi konsument?** W jednej transakcji zapisuje SHIPPED, powiązanie przesyłki i `processed_events`. Następnie usuwa cache zamówienia i wysyła ACK. Nieudane przetwarzanie daje NACK z `requeue=True`. Nieudane DEL daje 503; duplikat po ponowieniu ponownie usuwa cache, naprawiając przerwę po COMMIT.
+4. **Jak rozpoznaje duplikat?** `event_id` jest kluczem głównym w SQLite. Ten sam identyfikator i dane nie zmieniają stanu ponownie; niezgodne dane pod tym samym ID są odrzucane. Zapis przetrwa restart konsumenta. ACK następuje dopiero po poprawnej obsłudze.
+5. **Co przy wyłączonym odbiorcy?** Wiadomość czeka we wcześniej zadeklarowanej kolejce. Po starcie Outbound trzeba wywołać odbiór. Jeżeli wyłączony Outbound uniemożliwia wcześniejsze sprawdzenie PACKED, eksperyment wykonujemy przez bezpośrednią publikację przygotowanego zdarzenia, zgodnie z instrukcją laba.
+
+### Wspólna obsługa i zmiany w kodzie
+
+`app/messaging.py` oparto na adapterze `lab5-support/demo/shared/messaging.py`. Dodano publisher confirms i `mandatory=True`, aby brak pasującej kolejki nie kończył się pozornym sukcesem. Wiadomości mają `delivery_mode=2`. Połączenie powstaje dopiero podczas operacji i jest zamykane po niej; wywołania blokujące w asynchronicznym Shipping są wykonywane w puli wątków.
+
+Wszystkie cztery usługi dostają `app.state.event_broker` i opcjonalny parametr `event_broker`. Inventory i Auth nie tworzą kolejek ani nie wykonują połączeń z RabbitMQ przy zwykłych operacjach. Outbound wiąże swoją kolejkę przy starcie; brak brokera nie blokuje startu jego HTTP. Odbiór ponawia deklarację kolejki po odzyskaniu brokera.
+
+Modelem zdarzenia jest `app/models/events.py`. Producent działa w `app/services/shipping.py`, konsument w `app/services/orders.py`, a atomowy zapis w `app/repositories.py`. Nowa tabela `processed_events` znajduje się wyłącznie w bazie Outbound i tworzy się przy starcie; istniejące kolumny baz pozostają bez zmian. Dotychczasowy HTTP `/orders/{id}/dispatch` pozostaje dostępny, ale zwykły przepływ Shipping korzysta z RabbitMQ.
+
+**Odbiór jest ręczny, nie działa w tle.** W Swaggerze Outbound wybierz `POST /orders/consume-events`. Przez Gateway jest to `/api/orders/consume-events`; istniejąca trasa `/api/orders/**` już go obsługuje. Odpowiedź zawiera `consumed_messages` i `unique_events_processed`, np. 2 odebrane wiadomości i 1 nowe zdarzenie. Parametr `limit` ma zakres 1–500.
+
+### Uruchomienie i pokaz w Swaggerze
+
+Sprawdzone wersje: Python 3.13.9, pika 1.5.0, obraz `rabbitmq:3.13-management-alpine`. Konfiguracja `.env`:
+
+```dotenv
+RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/%2F
+RABBITMQ_EXCHANGE=warehouse.events
+```
+
+Pozostałe zmienne baz, Redis, JWT i Eureki opisano na początku README. RabbitMQ ma port AMQP 5672 i panel [Management](http://127.0.0.1:15672/) (lokalnie `guest` / `guest`). Compose przypina porty do 127.0.0.1 i przechowuje dane brokera w wolumenie `rabbitmq-data` ze stałą nazwą hosta.
+
+Z głównego katalogu projektu uruchom cały zestaw przez `scripts/setup.ps1` albo `bash scripts/setup.sh`. Przy starcie ręcznym najpierw wykonaj `docker compose up -d redis rabbitmq`, następnie uruchom Eurekę, Auth, Inventory, Outbound, Shipping i Gateway według instrukcji na początku README. Kolejka musi zostać utworzona przez Outbound przed pierwszą publikacją. Zatrzymanie ręczne: Ctrl+C w terminalach oraz `docker compose stop redis rabbitmq`; wolumen i bazy pozostają zachowane.
+
+Pokaz przepływu:
+
+1. Zaloguj się w Auth i użyj tokenu w Authorize. Przygotuj towar, zamówienie RESERVED → PACKED i przesyłkę NEW → READY.
+2. Dwa razy odczytaj zamówienie przez Gateway: X-Cache MISS → HIT.
+3. Wykonaj `/shipments/{id}/hand-over`. Shipping ma HANDED_OVER, ale zamówienie nadal PACKED; w kolejce jest Ready: 1.
+4. Wykonaj `/orders/consume-events`. Otrzymasz 1 odebraną wiadomość i 1 nowe zdarzenie, a kolejka będzie pusta.
+5. Odczytaj zamówienie: SHIPPED oraz MISS, a przy kolejnym odczycie HIT. Odpowiedzi tras mają X-Gateway: lab4.
+
+Przy wyłączonym brokerze publikacja i odbiór zwracają **503**. Wydanie kurierowi pozostaje zapisane z `notification_pending=true`; po przywróceniu RabbitMQ wywołaj `/shipments/{id}/sync`, a potem odbiór w Outbound. False oznacza przyjęcie wiadomości przez broker, a nie zmianę zamówienia przez konsumenta.
+
+### Testy i wyniki eksperymentów
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+# W izolowanym środowisku z działającymi usługami i RabbitMQ:
+$env:GATEWAY_TOKEN = '<token-administratora>'
+.\.venv\Scripts\python.exe -m pytest -o addopts= tests/integration -q
+```
+
+Podstawowe testy używają `InMemoryEventBroker`, bez sieci i kontenerów. Testy integracyjne wymagają tych samych `RABBITMQ_URL` i `RABBITMQ_EXCHANGE` co aplikacje; uruchamiaj je na odrębnych bazach, prefiksie Redis i vhoście RabbitMQ, ponieważ odbiór przetwarza całą powiązaną kolejkę. Weryfikację z 22.11.2026 wykonano na takich tymczasowych danych, po czym zatrzymano własne procesy i usunięto testowy vhost.
+
+Wynik: **131 testów jednostkowych i komponentowych oraz 12 integracyjnych przeszło**. Wyniki rzeczywistego wykonania zapisano w [raporcie LAB5](reports/lab5-verification.json).
+
+Oryginalne demo prowadzącego: 4 testy przeszły, 1 nie przeszedł. W `test_missing_destination_locker_returns_404_without_publishing` sprawdzenie `fake_eureka.stops == 1` znajduje się jeszcze wewnątrz aktywnego kontekstu lifespan, przed zatrzymaniem klienta. Pakietu prowadzącego nie zmieniano; jest to osobny wynik od testów naszego projektu.
+
+| Scenariusz | Działanie i oczekiwanie | Rzeczywisty wynik | Wniosek |
+|---|---|---|---|
+| Publikacja przez Gateway | Wydanie READY, oczekiwana wiadomość w kolejce | HTTP 200, Ready: 1, zamówienie nadal PACKED | Producent nie czeka na konsumenta |
+| Odbiór i cache | Odbiór, SHIPPED, DEL i ACK | 1 wiadomość / 1 zdarzenie, Ready: 0; MISS → HIT przed operacją i MISS → HIT po niej | Odczyt po odbiorze pochodzi z aktualnej bazy |
+| Duplikat | Dwie wiadomości z tym samym event_id | 2 odebrane / 1 nowe zdarzenie; dodatkowe pole JSON zaakceptowane | Idempotentność i Tolerant Reader |
+| Odrzucenie operacji | Zły stan, nieistniejąca przesyłka, zła waga | 409, 404, 422; Ready: 0 | Odrzucone operacje nie publikują |
+| Wyłączony Outbound | Bezpośrednia publikacja przygotowanego zdarzenia przy zatrzymanym procesie | Ready: 1; po starcie 1 wiadomość / 1 zdarzenie, SHIPPED i Ready: 0 | Wiadomość czeka na odbiorcę |
+| Wyłączony RabbitMQ | Próba wydania i odbioru | Obie operacje 503; HANDED_OVER i notification_pending=true | Fakt wydania nie ginie, publikacja wymaga ponowienia |
+| Powrót RabbitMQ | Start kontenera, /sync i odbiór | Sync 200, 1 wiadomość / 1 zdarzenie, SHIPPED | Powiadomienie zostaje dokończone |
+
+Własne testy to m.in. `test_event_waits_for_consume_and_invalidates_cache`, `test_duplicate_and_extra_fields_apply_once`, `test_invalid_operations_do_not_publish` i `test_broker_outage_keeps_pending_fact_and_sync_recovers`. Sprawdzono też trwałość deduplikacji po restarcie, naprawę cache po błędzie DEL, brak ACK przed powodzeniem handlera i dostęp do operacji odbioru wyłącznie dla SHIPPING/ADMIN. Wcześniejsze reguły biznesowe zachowano; testy wysyłki uwzględniają teraz osobny moment odbioru.
+
+### Ograniczenia, dokumentacja i autorzy
+
+Zapis Shipping i publikacja nie tworzą jednej transakcji rozproszonej. Pending oraz odtwarzalny event_id pozwalają ponowić powiadomienie po przerwaniu procesu; nie ma pełnej tabeli Transactional Outbox ani automatycznego publikatora. Dostarczenie może nastąpić więcej niż raz. Błędna wiadomość zatrzymuje bieżącą partię, pozostaje w kolejce i wymaga interwencji; nie ma DLQ. Zastosowano pojedynczy broker, bez klastra i bez gwarantowanego czasu przetworzenia. Eureka i Gateway pozostają poza Dockerem.
+
+| Źródło | Rozwiązany problem | Zastosowanie i weryfikacja |
+|---|---|---|
+| [Pakiet LAB5](https://pawoom.lazysolutions.pl/2026_2027/lab5/lab5-support.zip) | Wspólny adapter oraz atrapa do testów | Dostosowano RabbitEventBroker i InMemoryEventBroker do własnej domeny; testy projektu |
+| [RabbitMQ — ACK i publisher confirms](https://www.rabbitmq.com/docs/confirms) | Potwierdzenie po przetworzeniu i wykrywanie nieudanej publikacji | auto_ack=False, ACK po zapisie/cache, NACK, confirms i mandatory; testy duplikatu i awarii |
+| [RabbitMQ — queues](https://www.rabbitmq.com/docs/queues) | Trwała kolejka i buforowanie | durable, persistent, wolumen; rzeczywisty test zatrzymanego konsumenta i restart brokera |
+| [Pika — BlockingConnection/Channel](https://pika.readthedocs.io/en/stable/modules/adapters/blocking.html) | Publikacja i ręczny odbiór AMQP | basic_publish/basic_get/basic_ack/basic_nack, timeouty i zamykanie połączeń; pika 1.5.0 |
+
+Zakres i decyzje projektowe ustalono z Radosławem Cebulą. Implementację, testy i dokumentację LAB5 przygotował Codex na jego polecenie. Weryfikacja objęła 120 testów przed zmianami, cały zestaw po zmianach, uruchomienie wszystkich usług i eksperymenty na rzeczywistym RabbitMQ. Podział wcześniejszej pracy autorów znajduje się w LAB2/LAB4.

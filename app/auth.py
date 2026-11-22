@@ -17,10 +17,11 @@ from app.discovery import create_eureka_client
 from app.routers.auth import router
 from app.security import TokenVerifier
 from app.services.auth import AuthService
+from app.messaging import RabbitEventBroker
 
 
 def create_auth_app(*, database_url=None, private_key=None, token_verifier=None,
-                    discovery_enabled=True, eureka_client=None, token_ttl=None):
+                    discovery_enabled=True, eureka_client=None, token_ttl=None, event_broker=None):
     @asynccontextmanager
     async def lifespan(app):
         key = private_key or Path(os.getenv("JWT_PRIVATE_KEY_FILE", ".local/jwt-private.pem")).read_bytes()
@@ -35,7 +36,9 @@ def create_auth_app(*, database_url=None, private_key=None, token_verifier=None,
             raise ValueError("JWT_TTL_SECONDS must be between 1 and 3600")
         engine, sessions = make_database(database_url or os.getenv("AUTH_DATABASE_URL", "sqlite:///./auth.db"))
         discovery = None
+        broker = event_broker if event_broker is not None else RabbitEventBroker()
         try:
+            app.state.event_broker = broker
             Base.metadata.create_all(engine, tables=[UserRow.__table__])
             app.state.auth_service = AuthService(sessions)
             app.state.auth_enabled = True
@@ -48,9 +51,12 @@ def create_auth_app(*, database_url=None, private_key=None, token_verifier=None,
                 await discovery.start()
             yield
         finally:
-            if discovery is not None:
-                await discovery.stop()
-            engine.dispose()
+            try:
+                if discovery is not None:
+                    await discovery.stop()
+            finally:
+                broker.close()
+                engine.dispose()
 
     app = FastAPI(title="Magazyn — Auth", version="0.5.0", lifespan=lifespan)
     app.include_router(router)

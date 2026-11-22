@@ -45,6 +45,11 @@ def test_full_reservation_packing_shipping_via_gateway(gateway_client, stock):
     assert response.json()['status'] == 'HANDED_OVER'
     assert response.json()['handed_over_at'] is not None
     assert response.json()['notification_pending'] is False
+    pending = gateway_client.get(order_path)
+    assert pending.json()['status'] == 'PACKED' and pending.headers['x-cache'] == 'HIT'
+    consumed = gateway_client.post('/api/orders/consume-events')
+    assert consumed.status_code == 200, consumed.text
+    assert consumed.json()['unique_events_processed'] >= 1
     read = gateway_client.get(order_path)
     assert read.json()['status'] == 'SHIPPED' and read.headers['x-cache'] == 'MISS'
     assert gateway_client.post(path + '/hand-over').status_code == 409

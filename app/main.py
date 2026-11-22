@@ -1,4 +1,5 @@
 import os
+import logging
 from contextlib import ExitStack, asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -6,10 +7,13 @@ from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.concurrency import run_in_threadpool
 
 from app.cache import JsonCache, make_redis
 from app.database import Base, make_database
-from app.db_models import OrderDispatchRow, OrderRow, ReceiptRow, ReservationBatchRow, ShipmentRow, StockRow
+from app.db_models import OrderDispatchRow, OrderRow, ProcessedEventRow, ReceiptRow, ReservationBatchRow, ShipmentRow, StockRow
+from app.messaging import BrokerUnavailableError, RabbitEventBroker
+from app.models.events import OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY
 from app.discovery import create_eureka_client
 from app.repositories import OrderRepository, ReceiptRepository, StockRepository
 from app.routers import allocations, health, orders, receipts, shipments, stocks
@@ -24,7 +28,7 @@ from app.services.stocks import StockService
 def create_app(database_url=None, redis_client=None, *, outbound_database_url=None,
                cache_prefix=None, cache_ttl=None, domain="both",
                discovery_enabled=False, eureka_client=None, shipping_database_url=None,
-               auth_enabled=None, token_verifier=None) -> FastAPI:
+               auth_enabled=None, token_verifier=None, event_broker=None) -> FastAPI:
     if domain not in {"both", "inventory", "outbound", "shipping"}:
         raise ValueError("Unknown domain")
     inventory_enabled = domain in {"both", "inventory"}
@@ -40,6 +44,9 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
         if not prefix.strip():
             raise ValueError("CACHE_PREFIX must not be empty")
         with ExitStack() as resources:
+            broker = event_broker if event_broker is not None else RabbitEventBroker()
+            resources.callback(broker.close)
+            app.state.event_broker = broker
             client = redis_client if redis_client is not None else make_redis(
                 os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"))
             resources.callback(client.close)
@@ -63,18 +70,22 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
                 engine, sessions = make_database(
                     outbound_database_url or os.getenv("OUTBOUND_DATABASE_URL", "sqlite:///./outbound.db"))
                 resources.callback(engine.dispose)
-                Base.metadata.create_all(engine, tables=[OrderRow.__table__, OrderDispatchRow.__table__])
+                Base.metadata.create_all(engine, tables=[OrderRow.__table__, OrderDispatchRow.__table__, ProcessedEventRow.__table__])
                 app.state.outbound_engine = engine
                 app.state.databases["outbound"] = engine
                 app.state.order_repository = OrderRepository(sessions)
                 app.state.order_cache = JsonCache(client, prefix=f"{prefix}:outbound", ttl=ttl, resource_name="order")
-                app.state.order_service = OrderService(app.state.order_repository, app.state.order_cache)
+                app.state.order_service = OrderService(app.state.order_repository, app.state.order_cache, broker)
+                try:
+                    await run_in_threadpool(broker.bind_queue, OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY)
+                except BrokerUnavailableError:
+                    logging.getLogger(__name__).warning("RabbitMQ unavailable; Outbound HTTP remains available")
             if domain == "shipping":
                 engine, sessions = make_database(shipping_database_url or os.getenv("SHIPPING_DATABASE_URL", "sqlite:///./shipping.db"))
                 resources.callback(engine.dispose)
                 Base.metadata.create_all(engine, tables=[ShipmentRow.__table__])
                 app.state.databases["shipping"] = engine
-                app.state.shipping_service = ShippingService(sessions, eureka_client)
+                app.state.shipping_service = ShippingService(sessions, eureka_client, broker)
             app.state.eureka_client = eureka_client
             if discovery_enabled:
                 discovery = eureka_client if eureka_client is not None else create_eureka_client(domain)

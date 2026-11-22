@@ -2,7 +2,7 @@ from typing import Annotated
 from urllib.error import HTTPError, URLError
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import ValidationError
 
 from app.models.order import Order, OrderCreate
@@ -20,6 +20,12 @@ def get_order_service(request: Request) -> OrderService:
 
 
 OrderServiceDep = Annotated[OrderService, Depends(get_order_service)]
+
+
+@router.post("/consume-events", dependencies=[Depends(require_roles("SHIPPING"))],
+             summary="Odbierz oczekujące powiadomienia o wydaniu przesyłek")
+def consume_events(service: OrderServiceDep, limit: int = Query(default=50, ge=1, le=500)):
+    return service.consume_events(limit)
 
 
 @router.post("", response_model=Order, status_code=201, dependencies=[Depends(require_roles("WAREHOUSE"))])
