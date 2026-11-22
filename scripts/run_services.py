@@ -233,15 +233,14 @@ def run(service, port):
     try:
         if service == "all":
             redis_url = environment.get("REDIS_URL", "redis://127.0.0.1:6379/0")
-            if not redis_ready(redis_url):
-                if not shutil.which("docker"):
-                    raise RuntimeError("Uruchom Redis samodzielnie lub zainstaluj i uruchom Docker Desktop.")
-                # Nie zatrzymujemy kontenera, ktory dzialal przed skryptem.
-                existing = subprocess.run([*compose, "ps", "--status", "running", "-q", "redis"],
-                                          capture_output=True, text=True, env=environment, check=True)
-                redis_started = not existing.stdout.strip()
-                subprocess.run([*compose, "up", "-d", "redis"], env=environment, check=True)
-                wait_until("Redis", lambda: redis_ready(redis_url), processes, timeout=30)
+            if not shutil.which("docker"):
+                raise RuntimeError("Do startu calego systemu zainstaluj i uruchom Docker Desktop.")
+            # Redis uruchamiamy przez Compose; dzialajacy kontener pozostaje po zamknieciu skryptu.
+            existing = subprocess.run([*compose, "ps", "--status", "running", "-q", "redis"],
+                                      capture_output=True, text=True, env=environment, check=True)
+            redis_started = not existing.stdout.strip()
+            subprocess.run([*compose, "up", "-d", "redis"], env=environment, check=True)
+            wait_until("Redis", lambda: redis_ready(redis_url), processes, timeout=30)
             processes.start("eureka", [maven, "-f", "eureka-server/pom.xml", "spring-boot:run"], environment)
         with httpx.Client(timeout=2, trust_env=False) as client:
             eureka_url = f"http://127.0.0.1:{eureka_port}"
@@ -285,6 +284,8 @@ def main(argv=None):
     if args.service == "all" and args.port is not None:
         parser.error("--port wymaga wybrania jednej uslugi przez --service")
     signal.signal(signal.SIGTERM, interrupt)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, interrupt)
     try:
         run(args.service, args.port)
     except KeyboardInterrupt:

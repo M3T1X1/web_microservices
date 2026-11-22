@@ -63,7 +63,7 @@ def simulated_stack(monkeypatch):
 
     def command_run(command, **kwargs):
         commands.append(command)
-        return SimpleNamespace(stdout="", returncode=0)
+        return SimpleNamespace(stdout="container-id" if "ps" in command else "", returncode=0)
 
     monkeypatch.setattr(startup, "load_environment", lambda: {"SERVICE_PORT": "9999"})
     monkeypatch.setattr(startup, "require_free_ports", lambda *_: None)
@@ -73,6 +73,7 @@ def simulated_stack(monkeypatch):
     monkeypatch.setattr(startup, "http_ready", lambda *_: True)
     monkeypatch.setattr(startup, "registered", lambda *_: True)
     monkeypatch.setattr(startup, "redis_ready", lambda *_: True)
+    monkeypatch.setattr(startup.shutil, "which", lambda *_: "docker")
     monkeypatch.setattr(startup.subprocess, "run", command_run)
     monkeypatch.setattr(startup.time, "sleep", lambda *_: startup.interrupt())
     return events, commands
@@ -89,7 +90,8 @@ def test_whole_stack_start_order_and_cleanup(simulated_stack):
         if event[0] == "start" and event[1] in startup.SERVICE_PORTS:
             assert event[2]["SERVICE_PORT"] == str(startup.SERVICE_PORTS[event[1]])
     assert events[-1] == ("stop",)
-    assert not commands  # Dzialajacy Redis pozostaje poza kontrola skryptu.
+    assert any("up" in command for command in commands)
+    assert not any("stop" in command for command in commands)  # Wczesniej dzialajacy kontener zostaje.
 
 
 def test_failed_service_start_stops_previous_processes(simulated_stack, monkeypatch):
@@ -110,8 +112,6 @@ def test_failed_service_start_stops_previous_processes(simulated_stack, monkeypa
 @pytest.mark.parametrize("already_running", [False, True])
 def test_redis_is_stopped_only_when_started_here(simulated_stack, monkeypatch, already_running):
     _, commands = simulated_stack
-    checks = iter([False, True])
-    monkeypatch.setattr(startup, "redis_ready", lambda *_: next(checks))
     monkeypatch.setattr(startup.shutil, "which", lambda *_: "docker")
 
     def command_run(command, **kwargs):

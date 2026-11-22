@@ -49,68 +49,99 @@ Gateway zachowuje domyślny timeout odpowiedzi 5 s, a trasa Shipping ma `metadat
 
 Brak lub błędny token daje 401; niewłaściwa rola 403. Kontrola działa również na bezpośrednich portach usług. `/health`, `/ready` i dokumentacja pozostają technicznie dostępne lokalnie. Auth sprawdza aktywność konta przy logowaniu i `/auth/me`, a także aktualną rolę administratora przy zarządzaniu kontami. Pozostałe usługi weryfikują JWT lokalnie: dezaktywowanie konta nie unieważnia natychmiast jego już wydanego tokenu, który może działać do `exp`. Zatrzymanie Auth nie blokuje operacji z ważnym tokenem. Nie dodano refresh tokenów, centralnej listy unieważnień ani limitowania prób logowania.
 
-Kontrola JWT jest domyślnie włączona we wspólnej fabryce (także `app.main:app`). Jawne `auth_enabled=False` w testach izoluje historyczne scenariusze biznesowe od uwierzytelniania; oddzielne testy sprawdzają zabezpieczenia z prawdziwymi podpisami. Nie ma zmiennej środowiskowej wyłączającej ochronę. Auth zawsze wymaga uwierzytelniania swoich chronionych operacji. Brak klucza publicznego przy włączonej ochronie przerywa start usługi; nie ma automatycznego przejścia w tryb bez ochrony.
+Kontrola JWT jest domyślnie włączona we wspólnej fabryce, również w trybie `both`. `app.main` udostępnia teraz wyłącznie funkcję `create_app()`, bez obiektu `app` do uruchamiania przez Uvicorn. Jawne `auth_enabled=False` w testach izoluje historyczne scenariusze biznesowe od uwierzytelniania; oddzielne testy sprawdzają zabezpieczenia z prawdziwymi podpisami. Nie ma zmiennej środowiskowej wyłączającej ochronę. Auth zawsze wymaga uwierzytelniania swoich chronionych operacji. Brak klucza publicznego przy włączonej ochronie przerywa start usługi; nie ma automatycznego przejścia w tryb bez ochrony.
 
 ### Przygotowanie i uruchomienie wszystkich usług
 
-Z głównego katalogu repozytorium przygotuj zależności (Python 3.12+, JDK 21 i Maven 3.9.x):
+Wymagania: Python 3.12+, JDK 21, Maven 3.9.x oraz działający Docker z Compose (na Windows Docker Desktop). Redis działa w kontenerze; Eureka i Gateway lokalnie przez Maven. `mvn -version` powinno wskazywać Javę 21 lub nowszą. Po instalacji narzędzi uruchom ponownie terminal i IDE.
 
-```bash
-bash scripts/setup.sh --setup-only --test
-mvn -f eureka-server/pom.xml package
-mvn -f gateway/pom.xml package
-.venv/bin/python scripts/init_auth.py --email admin@example.com
+Jeśli nie masz `.env`, skopiuj `.env.example` do `.env`. Nie kopiuj `.venv` z innego komputera.
+
+#### Start skryptem
+
+Windows, z głównego katalogu projektu:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+# Jedna usługa; infrastruktura uruchomiona osobno:
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -Service inventory
+# Inny port wybranej usługi:
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -Service outbound -Port 8120
 ```
 
-Na Windows zamiast pierwszego polecenia użyj `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -SetupOnly -Test`; zamiast `.venv/bin/python` używaj `.\.venv\Scripts\python.exe`.
-
-`init_auth.py` pyta dwukrotnie o hasło (12–128 znaków), tworzy lokalną parę RSA 2048 w `.local/` i pierwszego administratora w `auth.db`. Hasło nie jest argumentem procesu i nie trafia do repozytorium. Nie ma domyślnego hasła. Skrypt odmawia utworzenia kolejnego administratora startowego, gdy tabela użytkowników zawiera już konto, oraz nie nadpisuje kluczy. Kolejne konta tworzy administrator przez API. Nie usuwaj bazy ani kluczy przy zwykłym restarcie.
-
-Uruchom kolejno, w osobnych terminalach z głównego katalogu projektu:
+Debian/Linux:
 
 ```bash
-# 1. Redis — opcjonalnie własny lokalny serwer zamiast Compose
+bash scripts/setup.sh
+bash scripts/setup.sh --service inventory
+bash scripts/setup.sh --service outbound --port 8120
+```
+
+Bez wyboru usługi skrypt przygotowuje `.venv`, instaluje zależności i uruchamia Redis, Eurekę, Auth, Inventory, Outbound, Shipping oraz Gateway jako osobne procesy. Przy pierwszym starcie pyta o email i hasło administratora. `-Service` / `--service` wybiera `inventory`, `outbound`, `shipping` lub `auth`; port jest ustawiany również w konfiguracji Eureki. `-Port` / `--port` wymaga wybrania jednej usługi.
+
+`-SetupOnly` / `--setup-only` tylko przygotowuje środowisko Pythona; `-Test` / `--test` dodatkowo uruchamia testy. Wspólna logika jest w `scripts/run_services.py`. Skrypt wczytuje `.env` (zmienne terminala mają pierwszeństwo), czeka na gotowość procesów i zapisuje logi do `.local/logs/`. `Ctrl+C` zatrzymuje uruchomione procesy oraz Redis, jeżeli kontener nie działał przed startem skryptu. Bazy i klucze pozostają zachowane.
+
+#### Start ręczny
+
+Na Windows jednorazowo przygotuj środowisko; w Linuxie użyj `python3` i `.venv/bin/python`:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+# Tylko przy pierwszym przygotowaniu pustej bazy Auth; podaj własny email:
+.\.venv\Scripts\python.exe scripts/init_auth.py --email admin@example.com
+```
+
+`init_auth.py` pyta dwukrotnie o hasło (12–128 znaków), tworzy klucze RSA w `.local/` i administratora w `auth.db`. Nie ma domyślnego hasła; istniejące klucze nie są nadpisywane, a kolejne konta tworzy administrator przez API. Przy zmianie `AUTH_DATABASE_URL` przekaż ten sam adres do `init_auth.py` przez `--database-url`. Nie usuwaj baz ani kluczy przy zwykłym restarcie.
+
+Uruchom kolejno z głównego katalogu projektu; każdy serwer pierwszoplanowy w osobnym terminalu:
+
+```powershell
+# 1. Redis w Dockerze
 docker compose up -d redis
 
 # 2. Eureka
 mvn -f eureka-server/pom.xml spring-boot:run
 
 # 3. Auth
-.venv/bin/python -m uvicorn app.auth:app --host 127.0.0.1 --port 8104
+.\.venv\Scripts\python.exe -m uvicorn app.auth:app --port 8104 --env-file .env
 
 # 4. Inventory
-.venv/bin/python -m uvicorn app.inventory:app --host 127.0.0.1 --port 8101
+.\.venv\Scripts\python.exe -m uvicorn app.inventory:app --port 8101 --env-file .env
 
 # 5. Outbound
-.venv/bin/python -m uvicorn app.outbound:app --host 127.0.0.1 --port 8102
+.\.venv\Scripts\python.exe -m uvicorn app.outbound:app --port 8102 --env-file .env
 
 # 6. Shipping
-.venv/bin/python -m uvicorn app.shipping:app --host 127.0.0.1 --port 8103
+.\.venv\Scripts\python.exe -m uvicorn app.shipping:app --port 8103 --env-file .env
 
 # 7. Gateway
 mvn -f gateway/pom.xml spring-boot:run
 ```
 
-Nie trzeba ustawiać `SERVICE_PORT` przy domyślnych portach powyżej. Jeżeli ta zmienna pozostała ustawiona w terminalu z wcześniejszego etapu, usuń ją (`unset SERVICE_PORT` w Bash; `Remove-Item Env:SERVICE_PORT -ErrorAction SilentlyContinue` w PowerShell) lub ustaw właściwą wartość dla danego procesu. Przy niestandardowym `--port` ustaw również odpowiadający mu `SERVICE_PORT`, aby Eureka zgłaszała właściwy adres.
+W Linuxie zamień `.\.venv\Scripts\python.exe` na `.venv/bin/python`. Maven buduje aplikacje przy `spring-boot:run`; nie trzeba obrazów Docker dla Eureki ani Gateway.
+
+Przy ręcznym starcie na domyślnych portach `SERVICE_PORT` może pozostać nieustawione. Usuń jego starą wartość z terminala, jeżeli została po wcześniejszym uruchomieniu. Przy innym `--port` ustaw zgodny `SERVICE_PORT` w terminalu tej konkretnej usługi. Skrypty robią to automatycznie.
 
 | Zmienna | Domyślnie |
 |---|---|
-| DATABASE_URL / OUTBOUND_DATABASE_URL | `sqlite:///./inventory.db` / `sqlite:///./outbound.db` |
-| SHIPPING_DATABASE_URL / AUTH_DATABASE_URL | `sqlite:///./shipping.db` / `sqlite:///./auth.db` |
-| JWT_PRIVATE_KEY_FILE | `.local/jwt-private.pem` — potrzebny wyłącznie Auth |
-| JWT_PUBLIC_KEY_FILE | `.local/jwt-public.pem` — publiczny klucz weryfikacji |
-| JWT_ISSUER / JWT_AUDIENCE | `warehouse-auth` / `warehouse-api` — muszą być zgodne we wszystkich usługach |
-| JWT_TTL_SECONDS | 900 — używane w Auth |
-| EUREKA_SERVER_URL | `http://127.0.0.1:8761` |
-| GATEWAY_EUREKA_URL | `http://127.0.0.1:8761/eureka/` |
-| REDIS_URL | `redis://127.0.0.1:6379/0` |
-| CACHE_PREFIX / CACHE_TTL_SECONDS | `lab2:local:warehouse` / 60 |
+| `DATABASE_URL` / `OUTBOUND_DATABASE_URL` | `sqlite:///./inventory.db` / `sqlite:///./outbound.db` |
+| `SHIPPING_DATABASE_URL` / `AUTH_DATABASE_URL` | `sqlite:///./shipping.db` / `sqlite:///./auth.db` |
+| `JWT_PRIVATE_KEY_FILE` / `JWT_PUBLIC_KEY_FILE` | `.local/jwt-private.pem` (tylko Auth) / `.local/jwt-public.pem` |
+| `JWT_ISSUER` / `JWT_AUDIENCE` / `JWT_TTL_SECONDS` | `warehouse-auth` / `warehouse-api` / 900 |
+| `EUREKA_SERVER_URL` | `http://127.0.0.1:8761` |
+| `INSTANCE_IP` / `INSTANCE_HOST` | `127.0.0.1` / `localhost`, adres instancji w rejestrze |
+| `SERVICE_PORT` | 8101 / 8102 / 8103 / 8104, zależnie od usługi |
+| `EUREKA_PORT` / `GATEWAY_PORT` | 8761 / 8080 |
+| `GATEWAY_EUREKA_URL` | `http://127.0.0.1:8761/eureka/` |
+| `REDIS_URL` | `redis://127.0.0.1:6379/0` |
+| `CACHE_PREFIX` / `CACHE_TTL_SECONDS` | `lab2:local:warehouse` / 60 |
 
-`.env.example` nie jest wczytywany automatycznie. Ustaw zmienne w terminalach, jeżeli zmieniasz domyślne wartości. Pliki SQLite pozostają w katalogu roboczym; nowe tabele pomocnicze w istniejących bazach Inventory i Outbound tworzą się przy starcie, bez zmiany dotychczasowych kolumn i bez kasowania danych. Każdy proces tworzy tylko własne tabele.
+`.env.example` jest wzorem. `.env` wczytują skrypty oraz ręczny Uvicorn z `--env-file .env`. Przy ręcznym starcie aplikacji Java ustaw zmienione wartości Eureki/Gateway w ich terminalach — Maven nie wczytuje `.env` automatycznie. Zmiana `INSTANCE_IP` / `INSTANCE_HOST` nie zmienia adresu nasłuchu Uvicorna. Pliki SQLite pozostają w katalogu roboczym; każdy proces tworzy tylko własne brakujące tabele.
 
-Poczekaj na cztery wpisy UP w Eurece i odświeżenie lokalnych rejestrów Gateway, Outbound oraz Shipping. Pierwsze wywołania zależności mogą zwracać kontrolowane 503, zanim zakończy się discovery. Interaktywne dokumentacje są na `/docs` portów 8101–8104. W Swaggerze Auth wykonaj `/auth/login`, skopiuj `access_token`, a następnie w wybranej usłudze użyj przycisku **Authorize** i wklej sam token.
+Poczekaj na cztery wpisy UP w Eurece i odświeżenie rejestrów klientów. Pierwsze wywołania mogą zwracać 503. Dokumentacje są pod `/docs` na portach 8101–8104. W Auth wykonaj `/auth/login`, a otrzymany `access_token` wklej w **Authorize** w dokumentacji wybranej usługi.
 
-Zatrzymanie: Ctrl+C w terminalach Gateway, Shipping, Outbound, Inventory, Auth i Eureka; dla własnego Redis z Compose: `docker compose stop redis`. Pozostaw bazy i klucze na dysku.
+Przy starcie ręcznym zatrzymuj serwery przez `Ctrl+C` w ich terminalach, a Redis przez `docker compose stop redis`. Zachowaj bazy i klucze.
 
 ### Endpointy nowych usług i przepływ realizacji zamówienia
 
@@ -155,7 +186,7 @@ Ograniczenia: jedna przesyłka na zamówienie, także po jej anulowaniu; brak et
 
 ### Testy nowych usług
 
-Wynik końcowej weryfikacji (19.11.2026): **101 testów jednostkowych i komponentowych oraz 11 integracyjnych przeszło**. Gateway zbudował się poprawnie, `pip check` nie wykazał niespójnych zależności. Cztery usługi zarejestrowały się w Eurece jako UP. Potwierdzono trwałość kont i przesyłek po restartach oraz działanie ważnego JWT przy zatrzymanym Auth. [Raport rzeczywistego wykonania](verification/services.json) dotyczy niezależnego środowiska na portach 18080, 18101–18104 i 18761.
+Weryfikacja z 22.11.2026: **120 testów jednostkowych i komponentowych oraz 11 integracyjnych przeszło**. Eureka i Gateway zbudowały się poprawnie przy użyciu JDK 21 i Mavena. Pełny zestaw działał z Redis w Dockerze, cztery usługi miały status UP, a adresy `/docs`, `/ready` i `/health` w rejestrze były poprawne. Testy wykonano na odrębnych tymczasowych bazach i kluczach, po czym procesy zatrzymano.
 
 ```bash
 # Szybkie testy: SQLite, prawdziwe podpisy RSA, atrapy Redis i discovery
@@ -166,11 +197,9 @@ Wynik końcowej weryfikacji (19.11.2026): **101 testów jednostkowych i komponen
 export GATEWAY_TOKEN='<access_token>'
 .venv/bin/python -m pytest -o addopts= tests/integration -q
 
-# Weryfikacja na własnych tymczasowych bazach i procesach, Debian/WSL:
-.venv/bin/python scripts/verify_services.py
 ```
 
-W PowerShell token ustaw przez `$env:GATEWAY_TOKEN = '<access_token>'`. Testy integracyjne tworzą własne unikalne SKU, zamówienia i konta; nie kasują baz użytkownika. Wymagają wszystkich czterech usług i sprawnego Redis. Skrypt `verify_services.py` wymaga zbudowanych JAR-ów, `redis-server` i Java 21 w PATH (opcjonalnie `--java /ścieżka/bin/java`). Sprawdza wolne porty 8080/8101–8104/8761, uruchamia własne siedem procesów, tworzy klucze i administratora tylko w katalogu tymczasowym, wykonuje integracje oraz restarty Shipping i Auth. Nie zatrzymuje procesów użytkownika ani nie czyści współdzielonego cache. Wynik zapisuje w `verification/services.json`. Jeżeli standardowe porty są zajęte, dodaj `--port-offset 10000`: testy użyją 18080, 18101–18104 i 18761, bez zatrzymywania istniejących procesów.
+W PowerShell token ustaw przez `$env:GATEWAY_TOKEN = '<access_token>'` i użyj `.\.venv\Scripts\python.exe`. Testy integracyjne tworzą unikalne SKU, zamówienia i konta; nie kasują baz użytkownika. Wymagają czterech usług, Gateway, Eureki i sprawnego Redis. `pytest.ini` pomija `tests/integration` podczas zwykłego uruchomienia; `-o addopts=` umożliwia ich osobne wykonanie.
 
 Nowe testy obejmują: hashe i brak haseł w odpowiedziach/walidacji, aktywność kont, unikalność emaila, role na bezpośrednich portach, JWT o złym podpisie/algorytmie/wystawcy/odbiorcy/czasie, atomowość rezerwacji, legalne przejścia statusów przesyłki, awarie zależności i utratę odpowiedzi po zatwierdzonym dispatch. W integracjach poprzednie siedem scenariuszy bramki działa z JWT, a cztery nowe sprawdzają Auth, role oraz pełny przepływ wysyłki.
 
@@ -178,7 +207,7 @@ Oficjalne źródła: [PyJWT — podpisy RSA i walidacja claims](https://pyjwt.re
 
 ## Dokumentacja historycznych etapów
 
-Poniższe sekcje zachowują opis LAB1–LAB4 sprzed wdrożenia Shipping i Auth. Występujące w nich określenia „planowane” i przykłady bez JWT dotyczą tamtego stanu projektu. Do aktualnego uruchomienia stosuj instrukcję powyżej.
+Sekcje LAB1/LAB2 i LAB4 zachowują opis wcześniejszych etapów. Określenia „planowane” i przykłady bez JWT dotyczą tamtego stanu projektu. Sekcja LAB3 została uzupełniona zgodnie z obecną implementacją. Do uruchamiania aktualnego kodu stosuj instrukcję na początku README.
 
 ## Uruchomienie i testy — historyczny tryb LAB1/LAB2
 
@@ -816,13 +845,94 @@ AI: użyto codexa to napisania testów. Pomógł też w kwestii ustalenia najlep
 
 
 
-## Etap LAB4 — bramka API i dwie niezależne usługi
+## 11. LAB3 — rejestracja i odnajdywanie usług
+
+Zakres według [instrukcji LAB3](https://pawoom.lazysolutions.pl/2026_2027/lab3/) i [szablonu dokumentacji](https://pawoom.lazysolutions.pl/2026_2027/lab3/lab3-support/demo/README-LAB3-template.html). Minimum etapu stanowią Inventory i Outbound. Opis odpowiada obecnemu kodowi; Shipping, Auth i Gateway są rozszerzeniami późniejszych etapów.
+
+### Usługi i granice odpowiedzialności
+
+| Usługa | Odpowiedzialność | Własne dane | Nazwa w Eurece | Port |
+|---|---|---|---|---|
+| Inventory | Stany, przyjęcia i rezerwacje | `inventory.db`: `stocks`, `receipts`, `reservation_batches` | `INVENTORY-SERVICE` | 8101 |
+| Outbound | Zamówienia, rezerwowanie przez Inventory i pakowanie | `outbound.db`: `orders`, `order_dispatches` | `OUTBOUND-SERVICE` | 8102 |
+
+Każda usługa działa w osobnym procesie i otwiera wyłącznie swoją bazę. Outbound korzysta z API Inventory. Zachowano transakcje SQLite, cache-aside Redis, TTL i unieważnianie cache po zapisie z LAB2. Inbound pozostaje modułem Inventory. Aktualnie rejestrują się również `SHIPPING-SERVICE` (8103) i `AUTH-SERVICE` (8104).
+
+### Konfiguracja i uruchomienie
+
+Sprawdzone wersje: Python **3.13.9**, FastAPI **0.162.0**, `py-eureka-client` **0.13.3**, JDK **21.0.13.1**, Maven **3.9.16**, Spring Boot **4.1.1** i Spring Cloud **2025.1.3**. Komendy Windows/Linux są w [aktualnej instrukcji startu](#przygotowanie-i-uruchomienie-wszystkich-usług).
+
+| Ustawienie | Wartość / znaczenie |
+|---|---|
+| `EUREKA_SERVER_URL` | `http://127.0.0.1:8761`, adres bazowy bez `/eureka` |
+| `eureka_context` w `app/discovery.py` | `/eureka`, endpointy serwera Spring Cloud |
+| `INSTANCE_IP`, `INSTANCE_HOST` | Domyślnie `127.0.0.1`, `localhost`; adresy instancji w rejestrze |
+| `SERVICE_PORT` | Port danego procesu, zgodny z `uvicorn --port` |
+| `home_page_url` / `status_page_url` / `health_check_url` | `/docs` / `/ready` / `/health` |
+
+Eureka działa lokalnie przez `mvn -f eureka-server/pom.xml spring-boot:run`; Docker Compose uruchamia wyłącznie Redis. Serwer Eureki sam nie rejestruje się ani nie pobiera rejestru. Adapter Python jest w `app/discovery.py`. Wszystkie usługi rejestrują instancje; Outbound i Shipping dodatkowo pobierają lokalną kopię rejestru.
+
+`lifespan` najpierw przygotowuje własną bazę i Redis, potem wykonuje `await client.start()`. Przy zamknięciu `finally` wykonuje `await client.stop()`, po czym zamykane są zasoby bazy i cache. Klient odpowiada za rejestrację, heartbeat i wyrejestrowanie. W testach jest zastępowany atrapą. `app.main` zawiera wspólną fabrykę; `both` pozostaje dla wcześniejszych testów, a zwykły start używa osobnych modułów usług.
+
+### Kontrakt komunikacji między usługami
+
+Outbound udostępnia `GET /orders/stock-check/{stock_id}`. Przyjmuje UUID i przez `do_service("INVENTORY-SERVICE", "/stocks/{id}", return_type="json", prefer_ip=True, timeout=3)` wywołuje Inventory. Zwraca obiekt `stock` i `available_quantity`, czyli ilość pomniejszoną o rezerwacje. Jest to odczyt dostępności; rezerwację wykonuje osobna operacja zamówienia.
+
+Aktualne API wymaga JWT z rolą WAREHOUSE lub ADMIN. Outbound przekazuje token do Inventory. Adres wybiera po nazwie logicznej z lokalnej kopii rejestru; żądanie biznesowe biegnie bezpośrednio między usługami.
+
+```mermaid
+flowchart LR
+    O[Outbound :8102] -->|HTTP GET /stocks/id| I[Inventory :8101]
+    I -. rejestracja i heartbeat .-> E[Eureka :8761]
+    O -. rejestracja, heartbeat i pobieranie rejestru .-> E
+```
+
+| Kod | Znaczenie |
+|---|---|
+| 200 | Odczyt Inventory i obliczona dostępność |
+| 404 | Inventory nie znalazł stanu o podanym UUID |
+| 422 | Niepoprawny UUID; brak wywołania Inventory |
+| 502 | Nieoczekiwany błąd HTTP zależności lub niepoprawne dane odpowiedzi |
+| 503 | Brak instancji, błąd połączenia lub timeout (3 s) |
+| 401 / 403 | Brak poprawnego tokenu / roli przy wejściu do endpointu Outbound |
+
+### Wyniki weryfikacji
+
+Weryfikacja z 22.11.2026: **120 testów automatycznych**, również wcześniejsze scenariusze LAB1/LAB2, oraz **11 integracyjnych** na rzeczywistym systemie. Osobno wykonano scenariusze LAB3 na tymczasowych bazach, kluczach i prefiksie cache:
+
+| Scenariusz | Stan początkowy i żądanie | Oczekiwany wynik | Wynik rzeczywisty | Przywrócenie stanu |
+|---|---|---|---|---|
+| Rejestracja | Eureka, Inventory i Outbound uruchomione osobno | Obie instancje UP | Dwa wpisy UP pod właściwymi nazwami i portami | Zatrzymanie własnych procesów |
+| Odnajdywanie | Znany UUID, GET Outbound `stock-check` | 200 i dane Inventory | 200, właściwy UUID, `available_quantity=10` | Brak zmiany danych |
+| Brak zasobu | GET `stock-check` z losowym UUID | 404 | 404, `Stock not found in Inventory` | Brak zmiany danych |
+| Awaria zależności | Zatrzymanie Inventory, ponowny GET | 503, health Outbound 200 | 503, `Inventory Service is unavailable`; health 200 | Ponowny start Inventory |
+| Restart zależności | Start Inventory na tej samej bazie i porcie | Ponownie 200 | 200 po 2,05 s, ten sam UUID, bez restartu Outbound | Zatrzymanie procesów po sprawdzeniu |
+| Awaria rejestru | Zatrzymanie Eureki po pobraniu rejestru | Odczyt może użyć zapisanych adresów | GET 200; health obu usług 200 | Kolejny start zaczyna się od Eureki |
+| Testy z atrapą | `pytest` bez działającej Eureki | Kontrolowane błędy i poprawny cykl klienta | 120 passed; m.in. 404, 422, 502, 503 i start/stop | Automatyczne zamknięcie zasobów |
+
+Własne testy LAB3 w `tests/test_discovery.py`: `test_stock_check_uses_logical_name_and_three_second_timeout`, `test_dependency_errors_are_controlled_and_health_stays_up`, `test_malformed_dependency_response_is_bad_gateway`, `test_invalid_uuid_does_not_call_inventory` i `test_separate_process_apps_only_initialize_owned_data`. Dodatkowe testy sprawdzają konfigurację adresów instancji i stron.
+
+Powtórzenie ręczne: uruchom system, zaloguj się w Auth, pobierz UUID z `GET :8101/stocks` i wykonaj `GET :8102/orders/stock-check/{UUID}` z `Authorization: Bearer <token>`. Do niezależnego zatrzymywania usług użyj osobnych terminali; wspólny skrypt przy awarii procesu zatrzymuje cały zestaw. Po teście zatrzymaj własne procesy i `docker compose stop redis`. Restart zachowuje bazy. Czyste dane uzyskuj przez osobne adresy baz i nowy `CACHE_PREFIX`.
+
+### Ograniczenia i wykorzystana dokumentacja
+
+UP potwierdza rejestrację/heartbeat, `/health` dostępność procesu, a odpowiedź domenowa działanie konkretnego przepływu. Jawne adresy health/ready są informacją w rejestrze; nie włączają ich odpytywania przez Eurekę. Lokalne kopie rejestru i dzierżawy aktualizują się asynchronicznie. Po nagłej awarii wpis może pozostać widoczny, również przez self-preservation. Wynik po zatrzymaniu Eureki dotyczy klienta z już pobranym adresem. Pomiar restartu nie gwarantuje czasu odzyskania ani odnalezienia instancji po zmianie portu. Brak klastra rejestru.
+
+| Źródło | Problem i zastosowanie | Sprawdzenie |
+|---|---|---|
+| [py-eureka-client 0.13.3](https://pypi.org/project/py-eureka-client/0.13.3/), [API biblioteki](https://github.com/keijack/python-eureka-client) | Klient asynchroniczny, konfiguracja instancji i `do_service` | Atrapy oraz rzeczywisty odczyt Outbound → Inventory |
+| [Netflix — Eureka REST operations](https://github.com/Netflix/eureka/wiki/Eureka-REST-operations) | Rejestracja, heartbeat, pobieranie i usunięcie wpisu; Spring używa `/eureka/*` zamiast pokazanego w specyfikacji `/eureka/v2` | Wpisy UP i zatrzymanie usług/rejestru |
+| [FastAPI — lifespan](https://fastapi.tiangolo.com/advanced/events/) | Start i zamknięcie klienta w cyklu aplikacji | Test start/stop i zamknięcie rzeczywistych procesów |
+
+Wkład autorów: **Radosław Cebula** — pierwotne rozdzielenie usług i integracja Eureki na `lab3_r`; **drugi autor projektu** — rozwój późniejszego etapu z Gateway. Wcześniejszy podział Inventory/SQLAlchemy i Outbound/Redis opisano w LAB2. ChatGPT/Codex pomógł w endpointach, testach, konfiguracji i dokumentacji; wynik sprawdzono przeglądem kodu, testami automatycznymi i rzeczywistymi scenariuszami HTTP opisanymi powyżej.
+
+## Etap LAB4 — bramka API i dwie niezależne usługi (opis historyczny)
 
 ### Ciągłość projektu i zakres
 
-Punktem wyjścia był commit `d73867a` i **73 przechodzące testy** LAB1/LAB2. W tej wersji repozytorium nie było jeszcze implementacji LAB3: osobnych procesów, rejestracji w Eurece ani komunikacji HTTP między domenami. Uzupełniono te wymagane podstawy razem z LAB4, bez zmiany tematu systemu magazynowego. Zachowano wszystkie wcześniejsze testy, endpointy, transakcje SQLite, cache-aside, TTL i unieważnianie po commit. Wcześniejsze sekcje README opisują historyczne etapy; aktualne uruchomienie opisano poniżej.
+Etap LAB4 dodał Gateway do Inventory i Outbound oraz wykorzystywał rejestrację i komunikację przez Eurekę. LAB3 był wcześniej rozwijany osobno na `lab3_r`; jego aktualny opis znajduje się w sekcji 11. Poniżej zachowano historyczny zakres LAB4, sprzed Shipping i Auth. Aktualne uruchamianie czterech usług opisano na początku README.
 
-Inventory (`app.inventory:app`, port 8101, `INVENTORY-SERVICE`) posiada stany, rezerwacje, przyjęcia i bazę `inventory.db`. Outbound (`app.outbound:app`, port 8102, `OUTBOUND-SERVICE`) posiada zamówienia i bazę `outbound.db`. Każdy proces tworzy wyłącznie własne tabele i nie otwiera bazy drugiej usługi. Wspólny kod fabryki i repozytoriów nie oznacza wspólnego procesu ani dostępu do cudzych danych. `app.main:app` zachowano jako zgodny z wcześniejszymi etapami tryb obu domen w jednym procesie; nie używamy go do prezentacji LAB4.
+Inventory (`app.inventory:app`, port 8101, `INVENTORY-SERVICE`) posiada stany, rezerwacje, przyjęcia i bazę `inventory.db`. Outbound (`app.outbound:app`, port 8102, `OUTBOUND-SERVICE`) posiada zamówienia i bazę `outbound.db`. Każdy proces tworzy wyłącznie własne tabele i nie otwiera bazy drugiej usługi. Wspólny kod fabryki i repozytoriów nie oznacza wspólnego procesu ani dostępu do cudzych danych. Obecnie `app.main` udostępnia wyłącznie fabrykę; `both` pozostało dla testów, a `uvicorn app.main:app` nie jest punktem startowym usług.
 
 Nowy endpoint `GET /orders/stock-check/{stock_id}` w Outbound wywołuje `do_service("INVENTORY-SERVICE", "/stocks/{id}", return_type="json", prefer_ip=True, timeout=3)`. Wynik zawiera `stock` oraz `available_quantity = quantity - suma rezerwacji`. Jest to informacyjny odczyt, nie potwierdzenie rezerwacji zamówienia. Odpowiedzi zależności mapowane są na: `404` — brak stanu; `502` — nieoczekiwany błąd HTTP lub niepoprawne dane; `503` — brak instancji, błąd połączenia albo timeout. `/health` Outbound pozostaje dostępny przy awarii Inventory. Komunikacja wewnętrzna biegnie bezpośrednio do adresu z Eureki, bez bramki.
 
@@ -889,7 +999,7 @@ mvn -f eureka-server/pom.xml package
 mvn -f gateway/pom.xml package
 ```
 
-Uruchom pięć komponentów w poniższej kolejności. Każdy proces pierwszoplanowy uruchamiaj w osobnym terminalu z **głównego katalogu repozytorium**. Wszystkie serwery nasłuchują wyłącznie na `127.0.0.1`. Skrypty starszych etapów uruchamiają `app.main:app`; do LAB4 stosuj polecenia poniżej.
+Poniższe pięć komponentów i przykłady bez JWT opisują historyczny stan LAB4. Obecne skrypty uruchamiają cały zestaw lub wybraną usługę, a komendy dla aktualnej wersji z Auth znajdują się na początku README. Każdy serwer pierwszoplanowy działa w osobnym terminalu z głównego katalogu repozytorium.
 
 1. Redis: `docker compose up -d redis`, następnie `docker compose exec redis redis-cli PING` (oczekiwane PONG). Można zamiast tego użyć własnego lokalnego serwera Redis.
 2. Eureka: `mvn -f eureka-server/pom.xml spring-boot:run`. Panel: `http://127.0.0.1:8761/`.
