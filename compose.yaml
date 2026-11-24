@@ -16,6 +16,7 @@ x-environment: &environment
   JWT_PUBLIC_KEY_FILE: /keys/public/jwt-public.pem
   JWT_ISSUER: warehouse-auth
   JWT_AUDIENCE: warehouse-api
+  SWAGGER_GATEWAY_ENABLED: "true"
 
 x-dependencies: &dependencies
   init-keys:
