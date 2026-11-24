@@ -600,4 +600,4 @@ Próby wykonano 24.11.2026 na uruchomionym środowisku Compose. Każdy komponent
 | Eureka | W tej krótkiej próbie wszystkie cztery trasy oraz stock-check nadal zwracały 200 dzięki pobranym wcześniej adresom |
 | Gateway | Żądania z hosta: błąd połączenia; /health wszystkich czterech mikrousług wewnątrz kontenerów: status ok |
 
-Szczegóły odpowiedzi: [reports/lab6-failure-observations.json](reports/lab6-failure-observations.json). Przypadek błędu unieważnienia cache podczas odbioru zdarzenia w sekcji 11 opisano na podstawie implementacji; nie był częścią powyższej próby awarii Redis.
+Przypadek błędu unieważnienia cache podczas odbioru zdarzenia w sekcji 11 opisano na podstawie implementacji; nie był częścią powyższej próby awarii Redis.
