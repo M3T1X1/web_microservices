@@ -238,7 +238,8 @@ def run(service, port):
     prepare_auth(environment, "auth" in selected)
     processes = Processes()
     started_containers = []
-    compose = ["docker", "compose", "-f", str(PROJECT_DIR / "compose.yaml")]
+    compose = ["docker", "compose", "-p", "warehouse-host", "-f", str(PROJECT_DIR / "compose.yaml"),
+               "-f", str(PROJECT_DIR / "compose.host.yaml")]
     try:
         if service == "all":
             if not shutil.which("docker"):

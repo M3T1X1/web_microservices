@@ -2,7 +2,7 @@ spring:
   application:
     name: warehouse-eureka
 server:
-  address: 127.0.0.1
+  address: ${SERVER_ADDRESS:127.0.0.1}
   port: ${EUREKA_PORT:8761}
 eureka:
   client:

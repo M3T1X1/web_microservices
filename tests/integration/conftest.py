@@ -1,8 +1,32 @@
 import os
+import json
+from pathlib import Path
+import subprocess
 from uuid import uuid4
 
 import httpx
 import pytest
+
+
+@pytest.fixture
+def publish_event():
+    def publish(routing_key, payload):
+        if os.getenv("LAB6_CONTAINERS") == "1":
+            # Wstrzyknięcie duplikatu do testu bez publikacji AMQP na hoście.
+            code = ("import json,sys; from app.messaging import RabbitEventBroker; "
+                    "key,payload=json.load(sys.stdin); broker=RabbitEventBroker(); "
+                    "broker.publish(key,payload); broker.close()")
+            subprocess.run(["docker", "compose", "exec", "-T", "outbound", "python", "-c", code],
+                           input=json.dumps([routing_key, payload]), text=True, check=True,
+                           cwd=Path(__file__).resolve().parents[2], timeout=30)
+        else:
+            from app.messaging import RabbitEventBroker
+            broker = RabbitEventBroker()
+            try:
+                broker.publish(routing_key, payload)
+            finally:
+                broker.close()
+    return publish
 
 
 @pytest.fixture

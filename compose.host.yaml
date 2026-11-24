@@ -1,0 +1,6 @@
+# Opcjonalny dodatek wyłącznie do starszego trybu procesów na hoście.
+services:
+  redis:
+    ports: ["127.0.0.1:6379:6379"]
+  rabbitmq:
+    ports: ["127.0.0.1:5672:5672", "127.0.0.1:15672:15672"]

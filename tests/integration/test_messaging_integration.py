@@ -1,14 +1,13 @@
 """Rzeczywisty RabbitMQ; uruchamiac na osobnych bazach i vhoscie testowym."""
 import pytest
 
-from app.messaging import RabbitEventBroker
 from app.models.events import SHIPMENT_ROUTING_KEY, ShipmentHandedOver
 from app.models.shipment import Shipment
 
 pytestmark = pytest.mark.integration
 
 
-def test_duplicate_message_updates_order_once_and_invalidates_cache(gateway_client, stock):
+def test_duplicate_message_updates_order_once_and_invalidates_cache(gateway_client, stock, publish_event):
     client = gateway_client
     order_response = client.post('/api/orders', json={'recipient_name': 'RabbitMQ test', 'recipient_phone': '1',
         'recipient_address': 'Test', 'items': [{'sku': stock['sku'], 'quantity': 1}]})
@@ -27,7 +26,7 @@ def test_duplicate_message_updates_order_once_and_invalidates_cache(gateway_clie
     assert handed.status_code == 200, handed.text
     assert client.get(order_path).json()['status'] == 'PACKED'
     event = ShipmentHandedOver.from_shipment(Shipment.model_validate(handed.json()))
-    RabbitEventBroker().publish(SHIPMENT_ROUTING_KEY, {**event.model_dump(mode='json'), 'future_field': 'ignored'})
+    publish_event(SHIPMENT_ROUTING_KEY, {**event.model_dump(mode='json'), 'future_field': 'ignored'})
     consumed = client.post('/api/orders/consume-events')
     assert consumed.status_code == 200, consumed.text
     assert consumed.json() == {'consumed_messages': 2, 'unique_events_processed': 1}

@@ -1,26 +1,199 @@
+x-python: &python
+  image: warehouse-python:lab6
+  build:
+    context: .
+  init: true
+  restart: unless-stopped
+  networks: [warehouse]
+
+x-environment: &environment
+  EUREKA_SERVER_URL: http://eureka:8761
+  REDIS_URL: redis://redis:6379/0
+  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+  RABBITMQ_EXCHANGE: warehouse.events
+  CACHE_PREFIX: lab6:warehouse
+  CACHE_TTL_SECONDS: "60"
+  JWT_PUBLIC_KEY_FILE: /keys/public/jwt-public.pem
+  JWT_ISSUER: warehouse-auth
+  JWT_AUDIENCE: warehouse-api
+
+x-dependencies: &dependencies
+  init-keys:
+    condition: service_completed_successfully
+  eureka:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  rabbitmq:
+    condition: service_healthy
+
+x-health: &health
+  interval: 5s
+  timeout: 3s
+  retries: 20
+  start_period: 15s
+
 services:
+  init-keys:
+    <<: *python
+    restart: "no"
+    command: ["python", "scripts/init_container_keys.py"]
+    volumes:
+      - jwt-private:/keys/private
+      - jwt-public:/keys/public
+
+  eureka:
+    build: ./eureka-server
+    restart: unless-stopped
+    networks: [warehouse]
+    environment:
+      SERVER_ADDRESS: 0.0.0.0
+      JAVA_TOOL_OPTIONS: -Xms64m -Xmx256m
+    expose: ["8761"]
+    healthcheck:
+      <<: *health
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8761/"]
+      start_period: 30s
+
   redis:
     image: redis:7-alpine
-    ports:
-      - "127.0.0.1:6379:6379"
+    restart: unless-stopped
+    networks: [warehouse]
+    expose: ["6379"]
     command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      <<: *health
+      test: ["CMD", "redis-cli", "ping"]
+
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     hostname: warehouse-rabbitmq
-    ports:
-      - "127.0.0.1:5672:5672"
-      - "127.0.0.1:15672:15672"
+    restart: unless-stopped
+    networks: [warehouse]
+    expose: ["5672", "15672"]
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
+      <<: *health
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 5s
       timeout: 5s
-      retries: 12
-      start_period: 10s
+      start_period: 20s
+
+  inventory:
+    <<: *python
+    command: ["python", "-m", "uvicorn", "app.inventory:app", "--host", "0.0.0.0", "--port", "8101"]
+    expose: ["8101"]
+    environment:
+      <<: *environment
+      INSTANCE_HOST: inventory
+      INSTANCE_IP: inventory
+      SERVICE_PORT: "8101"
+      DATABASE_URL: sqlite:////data/inventory.db
+    volumes:
+      - inventory-data:/data
+      - jwt-public:/keys/public:ro
+    depends_on: *dependencies
+    healthcheck:
+      <<: *health
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8101/ready', timeout=2)"]
+
+  outbound:
+    <<: *python
+    command: ["python", "-m", "uvicorn", "app.outbound:app", "--host", "0.0.0.0", "--port", "8102"]
+    expose: ["8102"]
+    environment:
+      <<: *environment
+      INSTANCE_HOST: outbound
+      INSTANCE_IP: outbound
+      SERVICE_PORT: "8102"
+      OUTBOUND_DATABASE_URL: sqlite:////data/outbound.db
+    volumes:
+      - outbound-data:/data
+      - jwt-public:/keys/public:ro
+    depends_on: *dependencies
+    healthcheck:
+      <<: *health
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8102/ready', timeout=2)"]
+
+  shipping:
+    <<: *python
+    command: ["python", "-m", "uvicorn", "app.shipping:app", "--host", "0.0.0.0", "--port", "8103"]
+    expose: ["8103"]
+    environment:
+      <<: *environment
+      INSTANCE_HOST: shipping
+      INSTANCE_IP: shipping
+      SERVICE_PORT: "8103"
+      SHIPPING_DATABASE_URL: sqlite:////data/shipping.db
+    volumes:
+      - shipping-data:/data
+      - jwt-public:/keys/public:ro
+    depends_on: *dependencies
+    healthcheck:
+      <<: *health
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8103/ready', timeout=2)"]
+
+  auth:
+    <<: *python
+    command: ["python", "-m", "uvicorn", "app.auth:app", "--host", "0.0.0.0", "--port", "8104"]
+    expose: ["8104"]
+    environment:
+      <<: *environment
+      INSTANCE_HOST: auth
+      INSTANCE_IP: auth
+      SERVICE_PORT: "8104"
+      AUTH_DATABASE_URL: sqlite:////data/auth.db
+      JWT_PRIVATE_KEY_FILE: /keys/private/jwt-private.pem
+      JWT_TTL_SECONDS: "900"
+    volumes:
+      - auth-data:/data
+      - jwt-private:/keys/private:ro
+      - jwt-public:/keys/public:ro
+    depends_on:
+      init-keys:
+        condition: service_completed_successfully
+      eureka:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8104/ready', timeout=2)"]
+
+  api-gateway:
+    build: ./gateway
+    restart: unless-stopped
+    networks: [warehouse]
+    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      SERVER_ADDRESS: 0.0.0.0
+      GATEWAY_EUREKA_URL: http://eureka:8761/eureka/
+      JAVA_TOOL_OPTIONS: -Xms64m -Xmx256m
+    depends_on:
+      eureka:
+        condition: service_healthy
+      inventory:
+        condition: service_healthy
+      outbound:
+        condition: service_healthy
+      shipping:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+
+networks:
+  warehouse:
+    driver: bridge
 
 volumes:
+  inventory-data:
+  outbound-data:
+  shipping-data:
+  auth-data:
   rabbitmq-data:
+  jwt-private:
+  jwt-public:

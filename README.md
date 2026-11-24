@@ -1,8 +1,219 @@
 # System magazynowy — Inventory, Outbound, Shipping i Auth
 
+## LAB6 — cały system w Docker Compose
+
+Aktualny sposób uruchamiania to **Docker Compose**. Cztery mikrousługi, Eureka, Redis, RabbitMQ i Gateway działają w kontenerach. Dodatkowy kontener `init-keys` wykonuje jednorazową inicjalizację kluczy i kończy pracę kodem `0`; jego stan `Exited (0)` jest prawidłowy. Dokumentacja wcześniejszych etapów poniżej zachowuje historyczne przykłady uruchamiania na hoście.
+
+### Uruchomienie i pierwsze konto
+
+Wymagania do uruchomienia: działający Docker Engine / Docker Desktop z Docker Compose v2. Python, Java i Maven na hoście nie są potrzebne. Budowanie wymaga dostępu do rejestru obrazów, PyPI i Maven Central. Polecenia wykonuj w głównym katalogu projektu:
+
+```sh
+docker compose up --build -d
+docker compose ps -a
+docker compose logs --tail=50
+docker compose logs -f inventory outbound shipping auth api-gateway
+```
+
+Procesy JVM kompilują się wieloetapowo w Maven/JDK 21. Obrazy uruchomieniowe zawierają JRE 21. Python 3.13 instaluje zależności przed skopiowaniem kodu, dzięki czemu edycja aplikacji zachowuje cache warstwy instalacji. `.dockerignore` w trzech kontekstach wyklucza lokalne środowiska, bazy, klucze i artefakty kompilacji. Usługi aplikacyjne oraz JVM działają jako użytkownik `warehouse` (UID 10001), z prawem zapisu do przygotowanego `/data`.
+
+Przy pierwszym uruchomieniu utwórz administratora (email zastąp własnym):
+
+```sh
+docker compose exec auth python scripts/init_auth.py --email admin@example.com --keys-dir /keys/private
+```
+
+Skrypt zapyta o hasło dwukrotnie; nie umieszczaj hasła w poleceniu. Bootstrap wymaga pustej tabeli użytkowników. Klucze istnieją już w wolumenach i nie są nadpisywane. Kolejne konta tworzy administrator przez `POST /api/auth/users`. Zaloguj się przez `POST http://127.0.0.1:8080/api/auth/login` z JSON `{"email":"admin@example.com","password":"<własne hasło>"}` i używaj `Authorization: Bearer <access_token>`. Token ma ważność 900 s.
+
+```sh
+curl -i http://127.0.0.1:8080/health
+curl -i -H 'Authorization: Bearer <access_token>' http://127.0.0.1:8080/api/stocks
+```
+
+Po starcie kontenerów klienci Eureki potrzebują jeszcze chwili na pobranie rejestru. Stan `healthy` Gateway potwierdza jego `/health`, a nie gotowość wszystkich tras `lb://`. Początkowe 503 należy ponowić; skrypt weryfikacyjny czeka na wszystkie cztery trasy.
+
+### Sieć, porty, zależności i dane
+
+| Usługa | Obraz / Dockerfile | Port w sieci Compose | Port hosta | Konfiguracja i wolumeny |
+|---|---|---|---|---|
+| `init-keys` | `warehouse-python:lab6`, główny `Dockerfile` | — | — | Zapis do `jwt-private` i `jwt-public`; zadanie jednorazowe |
+| `eureka` | `eureka-server/Dockerfile`, Maven → JRE | 8761 | — | `SERVER_ADDRESS=0.0.0.0`; healthcheck strony głównej |
+| `redis` | `redis:7-alpine` | 6379 | — | Cache ulotny; wyłączone RDB i AOF; `redis-cli ping` |
+| `rabbitmq` | `rabbitmq:3.13-management-alpine` | 5672, 15672 | — | `rabbitmq-data:/var/lib/rabbitmq`; `rabbitmq-diagnostics ping` |
+| `inventory` | główny `Dockerfile` | 8101 | — | `DATABASE_URL=sqlite:////data/inventory.db`; `inventory-data:/data` |
+| `outbound` | główny `Dockerfile` | 8102 | — | `OUTBOUND_DATABASE_URL=sqlite:////data/outbound.db`; `outbound-data:/data` |
+| `shipping` | główny `Dockerfile` | 8103 | — | `SHIPPING_DATABASE_URL=sqlite:////data/shipping.db`; `shipping-data:/data` |
+| `auth` | główny `Dockerfile` | 8104 | — | `AUTH_DATABASE_URL=sqlite:////data/auth.db`; `auth-data:/data`; klucz prywatny tylko w Auth |
+| `api-gateway` | `gateway/Dockerfile`, Maven → JRE | 8080 | `127.0.0.1:8080` | `SERVER_ADDRESS=0.0.0.0`, `GATEWAY_EUREKA_URL=http://eureka:8761/eureka/` |
+
+Wszystkie kontenery należą do sieci mostkowej `warehouse`, której rzeczywista nazwa otrzymuje prefiks projektu Compose. Brak `ports` ukrywa mikrousługi i infrastrukturę przed klientem łączącym się z portami hosta; `expose` opisuje porty wewnętrzne, nie jest zaporą między kontenerami. Sieć nie ma `internal: true`: izolację wejścia zapewnia brak publikacji portów, a kontenery mogą wykonywać ruch wychodzący. Na Linuksie administrator hosta może mieć dostęp do adresów IP kontenerów; nie jest to izolacja od administratora.
+
+Uvicorn nasłuchuje na `0.0.0.0`, aby przyjmować ruch z sieci kontenerowej. `127.0.0.1` wewnątrz kontenera oznacza sam kontener. Host korzysta z `127.0.0.1:8080`, natomiast usługi używają DNS Dockera:
+
+| Zmienna | Wartość w Compose |
+|---|---|
+| `EUREKA_SERVER_URL` | `http://eureka:8761` |
+| `INSTANCE_HOST`, `INSTANCE_IP` | Odpowiednio `inventory`, `outbound`, `shipping`, `auth` |
+| `SERVICE_PORT` | Odpowiednio 8101, 8102, 8103, 8104 |
+| `REDIS_URL` | `redis://redis:6379/0` |
+| `RABBITMQ_URL` | `amqp://guest:guest@rabbitmq:5672/%2F` |
+| `RABBITMQ_EXCHANGE` | `warehouse.events` |
+| `CACHE_PREFIX`, `CACHE_TTL_SECONDS` | `lab6:warehouse`, 60 |
+| `JWT_PUBLIC_KEY_FILE` | `/keys/public/jwt-public.pem` we wszystkich czterech usługach |
+| `JWT_PRIVATE_KEY_FILE` | `/keys/private/jwt-private.pem` wyłącznie w Auth |
+| `JWT_ISSUER`, `JWT_AUDIENCE` | `warehouse-auth`, `warehouse-api` |
+| `JWT_TTL_SECONDS` | 900 w Auth |
+| `JAVA_TOOL_OPTIONS` | `-Xms64m -Xmx256m` w Gateway i Eurece |
+
+Compose podaje te wartości jawnie i nie wymaga `.env`. `.env.example` dotyczy starszego trybu hosta. Klucze generowane są przy pierwszym starcie; `jwt-public` montowany jest tylko do odczytu w czterech usługach, `jwt-private` tylko w Auth (oraz do zapisu w zadaniu inicjalizującym). Do obrazów nie trafiają klucze ani hasła administratora. Nie ma domyślnego hasła konta aplikacji. Konto `guest` RabbitMQ dotyczy lokalnego środowiska laboratoryjnego, którego port AMQP nie jest publikowany.
+
+`depends_on` czeka na `service_healthy` Eureki, Redis i RabbitMQ przed uruchomieniem Inventory, Outbound i Shipping. Auth wymaga Eureki; wszystkie cztery usługi wymagają udanego zakończenia `init-keys` (`service_completed_successfully`). Gateway czeka na gotowość czterech usług i Eureki. Healthcheck usług Python wywołuje `/ready` (własna baza; dla usług domenowych także informacja o Redis). Redis może oznaczać stan `degraded` przy nadal sprawnej bazie; kod 200 pozwala wtedy dalej obsługiwać ruch. Healthcheck nie zastępuje obsługi awarii w działającej aplikacji i sam nie restartuje procesu.
+
+```mermaid
+flowchart TB
+    C[Klient na hoście] -->|127.0.0.1:8080| G
+    subgraph N[Sieć Docker Compose: warehouse]
+        G[api-gateway :8080]
+        E[eureka :8761]
+        R[(redis :6379)]
+        Q[rabbitmq :5672]
+        I[inventory :8101]
+        O[outbound :8102]
+        S[shipping :8103]
+        A[auth :8104]
+        K[init-keys: zadanie jednorazowe]
+        G -->|lb://INVENTORY-SERVICE| I
+        G -->|lb://OUTBOUND-SERVICE| O
+        G -->|lb://SHIPPING-SERVICE| S
+        G -->|lb://AUTH-SERVICE| A
+        O -->|HTTP z JWT, Eureka| I
+        S -->|HTTP z JWT, Eureka| O
+        S -->|ShipmentHandedOver| Q
+        Q -->|consume-events, ACK, deduplikacja| O
+        I --> R
+        O --> R
+        G -. rejestr .-> E
+        I -. rejestracja .-> E
+        O -. rejestracja .-> E
+        S -. rejestracja .-> E
+        A -. rejestracja .-> E
+    end
+    I --> ID[(inventory-data)]
+    O --> OD[(outbound-data)]
+    S --> SD[(shipping-data)]
+    A --> AD[(auth-data)]
+    Q --> QD[(rabbitmq-data)]
+    K --> PUB[(jwt-public)]
+    K --> PRIV[(jwt-private)]
+    PRIV --> A
+    PUB --> I
+    PUB --> O
+    PUB --> S
+    PUB --> A
+```
+
+### Testy i sześć scenariuszy weryfikacyjnych
+
+Testy jednostkowe można wykonać wewnątrz działającego kontenera; nie korzystają z rzeczywistych baz i brokerów:
+
+```sh
+docker compose exec inventory python -m pytest -q
+```
+
+Testy integracyjne działają na hoście i wysyłają żądania domenowe wyłącznie przez Gateway. Wymagają lokalnego Pythona 3.12+ i zależności z `requirements.txt`. W aktywnym środowisku Pythona:
+
+```sh
+python -m pip install -r requirements.txt
+python scripts/verify_lab6.py
+python scripts/verify_lab6.py --lifecycle
+```
+
+Skrypt pyta o email i hasło administratora; można też przekazać `LAB6_EMAIL` i `LAB6_PASSWORD` w środowisku albo gotowy `GATEWAY_TOKEN`. Dla pierwszego testu na pustej bazie Auth dostępny jest wariant:
+
+```sh
+python scripts/verify_lab6.py --bootstrap-test-admin --lifecycle
+```
+
+Tworzy on konto `lab6-admin@example.com` z losowym hasłem i zapisuje dane w lokalnym `.local/lab6-test-admin.json` z uprawnieniami `0600`. Plik nie jest kopiowany do obrazu. Kolejne uruchomienia skryptu odczytują go automatycznie. Jest to alternatywa dla ręcznego utworzenia pierwszego konta, wymaga pustej tabeli użytkowników. Nie uruchamiaj obu sposobów bootstrapu na tej samej bazie.
+
+Samodzielne uruchomienie pytest w Bash (token uzyskaj przez logowanie):
+
+```sh
+LAB6_CONTAINERS=1 GATEWAY_TOKEN='<access_token>' python -m pytest -o addopts= tests/integration -q
+```
+
+`LAB6_CONTAINERS=1` włącza inspekcję kontenerów i wstrzyknięcie duplikatu wiadomości przez `docker compose exec -T outbound`; nie wymaga wystawiania AMQP. Potrzebny jest dostęp do lokalnego silnika Docker. Testy integracyjne tworzą dane z unikalnymi identyfikatorami i pozostawiają je w bazach testowanego systemu. `--lifecycle` dodatkowo wykonuje `down`, `up -d --wait` i restart Inventory, więc powoduje krótką przerwę w tym projekcie. Nie usuwa wolumenów ani nie ingeruje w inne projekty.
+
+Wyniki rzeczywistego uruchomienia zapisuje `reports/lab6-verification.json` (bez haseł i tokenów). Sześć scenariuszy obejmuje:
+
+| Scenariusz | Sprawdzenie |
+|---|---|
+| 1. Budowanie i start | Budowanie Python/JVM, 8 usług healthy, inicjalizacja kluczy `Exited (0)`, cztery wpisy UP z nazwami kontenerów w Eurece |
+| 2. Izolacja portów | Inspekcja wszystkich mapowań: tylko `127.0.0.1:8080`; połączenia hosta z 8101–8104 odrzucane; przez Gateway 200 |
+| 3. Przepływ synchroniczny | JWT, walidacja 422, konflikt 409, zapis, cache MISS → HIT, unieważnienie, Outbound → Inventory przez Eurekę, `X-Gateway: lab4` |
+| 4. RabbitMQ | Wydanie przesyłki, stan PACKED przed odbiorem, dwie kopie zdarzenia → jedno przetworzenie, SHIPPED i cache MISS po odbiorze |
+| 5. Odtworzenie kontenerów | Po down/up nowe ID kontenerów; zachowane stany Inventory, Outbound, Shipping i Auth oraz przyjęcie POSTED; stary JWT nadal poprawny; pierwszy odczyt cache MISS |
+| 6. Restart Inventory | Ponowny odczyt przez Gateway i przez Outbound/Eurekę; pozostałe kontenery zachowują ID |
+
+Wyniki liczbowe i obserwacje po wykonaniu testów znajdują się poniżej w podsekcji „Wynik wykonania LAB6”. Działający na hoście niezależny Redis nie jest składnikiem tego środowiska; jego port nie wpływa na dowód braku mapowań Redis w Compose.
+
+### Wynik wykonania LAB6
+
+Weryfikacja 24.11.2026 na Debianie: Docker Engine **29.7.0**, Compose **5.3.1**, Python **3.13** oraz JRE **21**. Oba obrazy JVM zbudowano z powodzeniem, a w obrazie końcowym Gateway potwierdzono UID 10001 i brak Mavena.
+
+- Testy jednostkowe na hoście i wewnątrz kontenera: **129 passed, 2 skipped**. Pominięte przypadki dotyczą wyłącznie Windows.
+- Testy integracyjne przez skonteneryzowany Gateway: **15 passed**.
+- Osiem usług osiągnęło stan **healthy**, inicjalizacja kluczy zakończyła się **Exited (0)**.
+- Inspekcja mapowań potwierdziła wyłącznie **127.0.0.1:8080**; porty domenowe hosta **8101–8104** nie przyjmowały połączeń.
+- Cache, walidacja, konflikty, rezerwacja przez Eurekę i przekazywanie JWT zachowały kontrakty. Duplikat zdarzenia dał **2 odebrane wiadomości i 1 unikalne przetworzenie**.
+- Po **down/up** wszystkie kontenery otrzymały nowe ID; dane czterech domen i przyjęcie POSTED pozostały dostępne. Dotychczasowy JWT nadal działał. Pierwszy odczyt stanów i zamówienia zwrócił **MISS**.
+- Po restarcie **Inventory** powrócił odczyt przez Gateway oraz Outbound/Eurekę; pozostałe usługi zachowały ID kontenerów.
+
+Szczegółowy dowód sześciu scenariuszy i identyfikatory rekordów: [reports/lab6-verification.json](reports/lab6-verification.json). Ostrzeżenie deprecjacyjne Starlette/AnyIO nie spowodowało niepowodzenia testów.
+
+### Obsługa i diagnostyka
+
+```sh
+docker compose ps -a
+docker compose logs --tail=50 inventory outbound shipping auth
+docker compose logs --tail=50 eureka api-gateway rabbitmq
+docker compose exec inventory python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8101/ready').read().decode())"
+docker compose exec eureka wget -qO- http://127.0.0.1:8761/eureka/apps
+docker compose exec rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
+docker compose restart inventory
+docker compose down
+docker compose up -d
+```
+
+`down` usuwa kontenery i sieć, zachowując nazwane wolumeny. Restart zachowuje również warstwę zapisu kontenera, ale trwałość baz nie zależy od niej: wszystkie pliki SQLite leżą w `/data` na osobnych wolumenach. Redis celowo traci cache przy odtworzeniu. RabbitMQ zachowuje dane i kolejki na `rabbitmq-data`.
+
+**Pełne wyczyszczenie tego projektu**, jeśli dane są już niepotrzebne:
+
+```sh
+docker compose down -v
+```
+
+Wariant `-v` usuwa wszystkie jego wolumeny: cztery bazy, wiadomości RabbitMQ i klucze JWT. Kolejny start wymaga ponownego bootstrapu konta; przy użyciu testowego konta usuń także nieaktualny `.local/lab6-test-admin.json`. Zwykłe zatrzymanie nie wymaga `-v`.
+
+Starszy tryb lokalnych procesów nadal obsługują `scripts/setup.sh`, `scripts/setup.ps1` i `scripts/run_services.py`. Używa osobnego projektu Compose `warehouse-host` i dodatku `compose.host.yaml`, który publikuje Redis i RabbitMQ dla procesów hosta. Nie uruchamiaj jednocześnie obu wariantów z Gateway na 8080. Dawne ręczne komendy `docker compose up -d redis rabbitmq` wymagają w tym trybie pełnego prefiksu `docker compose -p warehouse-host -f compose.yaml -f compose.host.yaml`. Podstawowe `compose.yaml` zachowuje izolację LAB6.
+
+### Źródła techniczne (EK_03)
+
+| Oficjalna dokumentacja | Problem i zastosowanie | Weryfikacja |
+|---|---|---|
+| [Docker — multi-stage builds](https://docs.docker.com/build/building/multi-stage/) | Oddzielenie Maven/JDK od JRE; `FROM ... AS build`, `COPY --from=build` w obu komponentach JVM | Poprawna kompilacja i uruchomienie; w obrazie końcowym brak Mavena |
+| [Docker — startup order](https://docs.docker.com/compose/how-tos/startup-order/) | Wyścig przy starcie; `healthcheck`, `service_healthy`, `service_completed_successfully` | Pierwszy start, odtworzenie całego środowiska i kontrola zdrowia |
+| [Docker — networking in Compose](https://docs.docker.com/compose/how-tos/networking/) | Adresacja między kontenerami; DNS usług, `ports` tylko w Gateway | Wpisy Eureki, wywołania HTTP między usługami i inspekcja mapowań |
+| [Docker — volumes](https://docs.docker.com/engine/storage/volumes/) | Stan poza cyklem życia kontenera; osobne nazwane wolumeny i `/data` | Odtworzenie wszystkich kontenerów bez utraty danych i kluczy |
+
+Zachowano logikę domenową i kontrakty LAB1–LAB5. Inventory zarządza stanami i przyjęciami, Outbound zamówieniami i deduplikacją zdarzeń, Shipping przesyłkami, a Auth kontami. Każda usługa otwiera wyłącznie własną bazę. Wspólny kod Pythona upraszcza laboratorium, ale wiąże cykl wydania usług; wspólna baza ani bezpośrednie odczyty cudzych tabel nie są używane. Synchroniczne sprawdzanie i rezerwacja tworzą zależności dostępności, natomiast zdarzenie RabbitMQ oddziela wydanie przesyłki od późniejszej zmiany zamówienia. Nie jest to pełny mechanizm kompensacji wszystkich etapów procesu.
+
+Wersjonowanie API można wprowadzić przez nowe prefiksy i równoległe trasy Gateway; wzorzec Strangler Fig pozwoliłby stopniowo przenosić wybrane ścieżki ze starego systemu do nowych usług. W Kubernetes obrazy odpowiadałyby Deploymentom/Podom, komunikacja wewnętrzna Services, wejście Gateway API/Ingress, konfiguracja ConfigMap/Secret, dane PVC, a kontrole zdrowia readiness/liveness probes. SQLite i wspólne wolumeny nie zapewniają tu gotowego skalowania poziomego. Proponowany potok wdrożenia: testy jednostkowe → budowanie obrazów → testy integracyjne Compose → publikacja obrazów → wdrożenie. Orkiestracji Kubernetes i takiego potoku nie wdrażano w LAB6.
+
+
 ## Aktualny stan — cztery mikrousługi
 
-Zaimplementowane są **Inventory, Outbound, Shipping i Auth**. Każda usługa działa jako osobny proces i posiada własną bazę SQLite. Inbound (przyjęcia dostaw) pozostaje modułem Inventory. Wszystkie usługi rejestrują się w Eurece, a Gateway udostępnia ich API pod `/api/...`.
+Zaimplementowane są **Inventory, Outbound, Shipping i Auth**. Każda usługa działa w osobnym kontenerze i posiada własną bazę SQLite. Inbound (przyjęcia dostaw) pozostaje modułem Inventory. Wszystkie usługi rejestrują się w Eurece, a Gateway udostępnia ich API pod `/api/...`.
 
 | Usługa | Plik startowy | Port | Baza / tabele | Odpowiedzialność |
 |---|---|---|---|---|
@@ -11,7 +222,7 @@ Zaimplementowane są **Inventory, Outbound, Shipping i Auth**. Każda usługa dz
 | Shipping | `app/shipping.py` | 8103 | `shipping.db`: shipments | Przesyłki, przygotowanie, wydanie kurierowi i zdarzenie dla Outbound przez RabbitMQ |
 | Auth | `app/auth.py` | 8104 | `auth.db`: users | Konta, Argon2id, logowanie, JWT RS256 i role |
 
-Gateway działa na :8080, Eureka na :8761, Redis na :6379, a RabbitMQ na :5672 (panel :15672). Auth nie korzysta z Redis. Shipping zapisuje i czyta przesyłki bez cache; wspólna fabryka inicjalizuje adapter Redis i uwzględnia go w `/ready`, lecz jego awaria nie blokuje operacji na przesyłkach. Wszystkie usługi mają dostęp do wspólnego adaptera RabbitMQ; obecnie używa go tylko zdarzenie Shipping → Outbound. Szczegóły w [LAB5](#lab5).
+Gateway jest publikowany na 127.0.0.1:8080. Eureka :8761, Redis :6379 i RabbitMQ :5672 (panel :15672) są dostępne w sieci Compose. Auth nie korzysta z Redis. Shipping zapisuje i czyta przesyłki bez cache; wspólna fabryka inicjalizuje adapter Redis i uwzględnia go w `/ready`, lecz jego awaria nie blokuje operacji na przesyłkach. Wszystkie usługi mają dostęp do wspólnego adaptera RabbitMQ; obecnie używa go tylko zdarzenie Shipping → Outbound. Szczegóły w [LAB5](#lab5).
 
 ```mermaid
 flowchart TB
@@ -53,7 +264,7 @@ Brak lub błędny token daje 401; niewłaściwa rola 403. Kontrola działa równ
 
 Kontrola JWT jest domyślnie włączona we wspólnej fabryce, również w trybie `both`. `app.main` udostępnia teraz wyłącznie funkcję `create_app()`, bez obiektu `app` do uruchamiania przez Uvicorn. Jawne `auth_enabled=False` w testach izoluje historyczne scenariusze biznesowe od uwierzytelniania; oddzielne testy sprawdzają zabezpieczenia z prawdziwymi podpisami. Nie ma zmiennej środowiskowej wyłączającej ochronę. Auth zawsze wymaga uwierzytelniania swoich chronionych operacji. Brak klucza publicznego przy włączonej ochronie przerywa start usługi; nie ma automatycznego przejścia w tryb bez ochrony.
 
-### Przygotowanie i uruchomienie wszystkich usług
+### Przygotowanie i uruchomienie wszystkich usług — starszy tryb hosta
 
 Wymagania: Python 3.12+, JDK 21, Maven 3.9.x oraz działający Docker z Compose (na Windows Docker Desktop). Redis i RabbitMQ działają w kontenerach; Eureka i Gateway lokalnie przez Maven. `mvn -version` powinno wskazywać Javę 21 lub nowszą. Po instalacji narzędzi uruchom ponownie terminal i IDE.
 
@@ -208,7 +419,7 @@ W PowerShell token ustaw przez `$env:GATEWAY_TOKEN = '<access_token>'` i użyj `
 
 Testy obejmują hashe, role i JWT, atomowość rezerwacji, przejścia statusów przesyłki oraz awarie zależności. LAB5 dodaje publikację po zapisie, ręczny odbiór, duplikaty, ACK/NACK, utratę potwierdzenia publikacji i naprawę cache po ponowieniu. Integracje obejmują wcześniejsze scenariusze bramki/Auth/wysyłki oraz rzeczywisty duplikat RabbitMQ i unieważnienie Redis.
 
-Oficjalne źródła: [PyJWT — podpisy RSA i walidacja claims](https://pyjwt.readthedocs.io/en/stable/usage.html), użyte PyJWT 2.15.1; [argon2-cffi — PasswordHasher](https://argon2-cffi.readthedocs.io/en/stable/howto.html), użyte 25.1.0. Ich zastosowanie sprawdzono testami błędnych tokenów i logowania oraz rzeczywistym wywołaniem HTTP między usługami. Implementację i testy przygotował Codex na polecenie użytkownika; nie przypisujemy autorom projektu niepotwierdzonego udziału w tych zmianach.
+Oficjalne źródła: [PyJWT — podpisy RSA i walidacja claims](https://pyjwt.readthedocs.io/en/stable/usage.html), użyte PyJWT 2.15.1; [argon2-cffi — PasswordHasher](https://argon2-cffi.readthedocs.io/en/stable/howto.html), użyte 25.1.0. Ich zastosowanie sprawdzono testami błędnych tokenów i logowania oraz rzeczywistym wywołaniem HTTP między usługami.
 
 ## Dokumentacja historycznych etapów
 
@@ -453,11 +664,10 @@ Schematy pokazują docelowy system czterech usług. Obecnie działają tylko Inv
 | [FastAPI — TestClient](https://fastapi.tiangolo.com/tutorial/testing/#using-testclient) | Testowanie API | `TestClient(create_app())` | `pytest tests/test_health.py`: **1 passed** |
 | [OWASP — Access Control i JWT](https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html#access-control), [Password Storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) | Projektowanie logowania i uprawnień Auth | Plan: hash hasła, JWT i kontrola ról w usługach; bez implementacji | Przegląd projektu; testy Auth są dopiero planowane |
 
-## 7. Ograniczenia, autorzy i AI
+## 7. Ograniczenia
 
 Dane są trwałe w SQLite. Przyjęcia należą do Inventory; brakuje jeszcze automatycznej integracji Inventory–Outbound, zwalniania rezerwacji i wysyłki. Shipping i Auth są planowane. Obecnie nie ma kont, logowania, wydawania JWT ani kontroli ról w endpointach. Redis może zwracać starą kopię do wygaśnięcia TTL.
 
-- AI: ChatGPT pomógł w testach i endpointach; weryfikacja przez przegląd kodu i test `/health`.
 
 ## 8. Podział systemu na usługi
 
@@ -631,7 +841,7 @@ Rozwiązanie oparto na rzeczywiście pobranym [kodzie pomocniczym LAB2 — ZIP](
 | `demo.py` | Wzorzec sesji i repozytorium dostosowany do `StockRepository` i `OrderRepository`; odczyt cache-aside z `CachedLockers.get` przeniesiony do `cached_read()`; commit przed DEL w serwisach |
 | `tests/test_storage.py` | Klasa `MemoryRedis` skopiowana do `tests/fakes.py`; własna podklasa `ControlledRedis` dodaje awarie poszczególnych poleceń, kontrolowany zegar TTL i obserwację zamknięcia klienta |
 | `tests/test_storage.py` | Scenariusze trwałości, rollbacku, MISS/HIT z licznikiem odczytów, awarii SET i nieudanego unieważnienia dostosowane do własnego API HTTP |
-| `README-LAB2-template.md` | Podstawa struktury niniejszego uzupełnienia: decyzje, uruchomienie, dowody, porównanie, źródła i autorzy |
+| `README-LAB2-template.md` | Podstawa struktury niniejszego uzupełnienia: decyzje, uruchomienie, dowody, porównanie, źródła |
 
 Paczkomat z `demo.py` służył wyłącznie do zrozumienia mechanizmu repozytorium. Aplikacja obsługuje własną domenę magazynu; nie zawiera tabel ani endpointów paczkomatów. Oryginalny przykład pozostaje jedynie wewnątrz archiwum źródłowego.
 
@@ -677,7 +887,7 @@ Z katalogu projektu, Debian:
 export DATABASE_URL='sqlite:///./inventory.db'
 export OUTBOUND_DATABASE_URL='sqlite:///./outbound.db'
 export REDIS_URL='redis://127.0.0.1:6379/0'
-export CACHE_PREFIX='lab2:131427:warehouse'
+export CACHE_PREFIX='lab2:local:warehouse'
 export CACHE_TTL_SECONDS='60'
 docker compose up -d redis
 docker compose exec redis redis-cli PING
@@ -692,7 +902,7 @@ Windows 11, PowerShell, Python 3.12+ i Docker Desktop:
 $env:DATABASE_URL = 'sqlite:///./inventory.db'
 $env:OUTBOUND_DATABASE_URL = 'sqlite:///./outbound.db'
 $env:REDIS_URL = 'redis://127.0.0.1:6379/0'
-$env:CACHE_PREFIX = 'lab2:131427:warehouse'
+$env:CACHE_PREFIX = 'lab2:local:warehouse'
 $env:CACHE_TTL_SECONDS = '60'
 docker compose up -d redis
 docker compose exec redis redis-cli PING
@@ -744,10 +954,10 @@ Odpowiedź zawiera te same pola oraz serwerowy UUID `id` i `status: "NEW"`. `/re
 
 Cache-aside obejmuje wyłącznie szczegóły stanu i zamówienia. Listy i odczyty przyjęć czytają bazę. Do Redis trafia serializowana odpowiedź Pydantic, a nie obiekt ORM lub sesja. Adapter pobrany z ZIP sprawdza poprawność JSON, natomiast `cached_read()` dodatkowo sprawdza schemat Pydantic i UUID; uszkodzona kopia jest odtwarzana. Nie cache’ujemy 404.
 
-| Odczyt | Klucz dla prefiksu `lab2:131427:warehouse` | TTL | Unieważnienie |
+| Odczyt | Klucz dla prefiksu `lab2:local:warehouse` | TTL | Unieważnienie |
 |---|---|---|---|
-| `GET /stocks/{id}` | `lab2:131427:warehouse:inventory:stock:<UUID>` | 60 s | Udana rezerwacja, korekta ilości i księgowanie przyjęcia |
-| `GET /orders/{id}` | `lab2:131427:warehouse:outbound:order:<UUID>` | 60 s | Udane pakowanie |
+| `GET /stocks/{id}` | `lab2:local:warehouse:inventory:stock:<UUID>` | 60 s | Udana rezerwacja, korekta ilości i księgowanie przyjęcia |
+| `GET /orders/{id}` | `lab2:local:warehouse:outbound:order:<UUID>` | 60 s | Udane pakowanie |
 
 Nagłówek `X-Cache`: **MISS** — brak kopii i odczyt z bazy; **HIT** — odpowiedź z cache bez odczytu repozytorium; **BYPASS** — awaria GET lub SET Redis, odpowiedź z bazy. Przy 404 nagłówek nie jest wymagany. Po udanym zapisie repozytorium najpierw zatwierdza **commit**, a serwis dopiero później wykonuje **DEL**. Przy księgowaniu przyjęcia usuwa kopie wszystkich zmienionych stanów. Odrzucona operacja nie zmienia danych ani poprawnej kopii.
 
@@ -802,7 +1012,7 @@ Skrypt wybiera wolne porty, własny prefiks i tymczasowe bazy, a na końcu zamyk
 | Przywrócenie Redis | Start własnego procesu z pustym cache | MISS, następnie HIT, aktualne dane | Zgodny | Restart własnego Redis |
 | Nieudane unieważnienie | Cache ilości 20; klient z niedostępnym URL; PATCH 25; powrót właściwego URL | Stary HIT 20 do TTL, potem MISS 25 | Zgodny | Wygaśnięcie TTL |
 
-Do samodzielnej prezentacji użyj `/docs`, aby odczytać UUID, wykonać rezerwację i korektę. Nagłówki można obejrzeć przez `curl -i http://127.0.0.1:8101/stocks/<UUID>` (Windows: `curl.exe -i ...`). TTL własnego klucza: `docker compose exec redis redis-cli TTL 'lab2:131427:warehouse:inventory:stock:<UUID>'`. Używaj rzeczywistego UUID i prefiksu. Nie wykonuj `FLUSHALL` ani `FLUSHDB`.
+Do samodzielnej prezentacji użyj `/docs`, aby odczytać UUID, wykonać rezerwację i korektę. Nagłówki można obejrzeć przez `curl -i http://127.0.0.1:8101/stocks/<UUID>` (Windows: `curl.exe -i ...`). TTL własnego klucza: `docker compose exec redis redis-cli TTL 'lab2:local:warehouse:inventory:stock:<UUID>'`. Używaj rzeczywistego UUID i prefiksu. Nie wykonuj `FLUSHALL` ani `FLUSHDB`.
 
 Reset podczas developmentu: zatrzymaj aplikację, usuń lokalne pliki `inventory.db` i `outbound.db`, a następnie uruchom ją ponownie. Powstaną puste bazy z aktualnymi tabelami i indeksami oraz początkowym produktem. Reset usuwa zapisane dane. Po resecie ustaw nowy `CACHE_PREFIX`, aby nie korzystać z kopii poprzednich danych w Redis. Przy normalnym restarcie pozostaw pliki baz.
 
@@ -828,7 +1038,7 @@ Zmiana SQLite na PostgreSQL wymaga sterownika, konfiguracji, schematu/migracji, 
 
 Brakuje jeszcze integracji HTTP Inventory–Outbound, zwalniania rezerwacji, implementacji Shipping i Auth oraz mechanizmu naprawy unieważnień poza TTL. Do wdrożenia Auth pozostają konta, logowanie i sprawdzanie JWT oraz ról w pozostałych usługach. Przyjęcia są częścią Inventory; anulowanie po `POSTED` wymagałoby osobnego mechanizmu odwrócenia dostawy. Cache odpowiedzi z danymi odbiorcy wymaga ograniczenia dostępu do Redis. Na tym etapie jest on wystawiony wyłącznie lokalnie. Nie deklarujemy gotowości produkcyjnej.
 
-### Dokumentacja, autorzy i AI — LAB2
+### Dokumentacja — LAB2
 
 | Źródło | Problem | Zastosowanie | Weryfikacja |
 |---|---|---|---|
@@ -837,18 +1047,6 @@ Brakuje jeszcze integracji HTTP Inventory–Outbound, zwalniania rezerwacji, imp
 | [redis-py 6.4 — połączenia](https://redis.readthedocs.io/en/v6.4.0/connections.html#redis.Redis.from_url) | URL, timeouty, ponowienia i opcjonalność cache | `make_redis()` z ZIP: `Redis.from_url`, tekst, timeouty 0,3 s i brak ponowień | Awaria GET/SET/DELETE w testach oraz zatrzymanie i przywrócenie rzeczywistego serwera |
 
 Dokumentację oficjalnych bibliotek przeczytano i porównano z kodem. Nie instalowano zewnętrznych skilli SQLAlchemy. Testy wstrzykują własnego klienta cache i adresy baz przez parametry `create_app()`.
-
-Numer albumu: **131427**. 
-
-Zajmowałem się kwestiami Outboundu oraz redisa. Przeglądałem testy napisane przez duży model językowy.
-
-Numer albumu: **131413**. 
-
-Zajmowałem się kwestiami Inventory oraz sqlalchemy. Przeglądałem testy napisane przez duży model językowy.
-
-AI: użyto codexa to napisania testów. Pomógł też w kwestii ustalenia najlepszych wersji redisa i sqlalchemy
-
-
 
 ## 11. LAB3 — rejestracja i odnajdywanie usług
 
@@ -929,7 +1127,6 @@ UP potwierdza rejestrację/heartbeat, `/health` dostępność procesu, a odpowie
 | [Netflix — Eureka REST operations](https://github.com/Netflix/eureka/wiki/Eureka-REST-operations) | Rejestracja, heartbeat, pobieranie i usunięcie wpisu; Spring używa `/eureka/*` zamiast pokazanego w specyfikacji `/eureka/v2` | Wpisy UP i zatrzymanie usług/rejestru |
 | [FastAPI — lifespan](https://fastapi.tiangolo.com/advanced/events/) | Start i zamknięcie klienta w cyklu aplikacji | Test start/stop i zamknięcie rzeczywistych procesów |
 
-Wkład autorów: **Radosław Cebula** — pierwotne rozdzielenie usług i integracja Eureki na `lab3_r`; **drugi autor projektu** — rozwój późniejszego etapu z Gateway. Wcześniejszy podział Inventory/SQLAlchemy i Outbound/Redis opisano w LAB2. ChatGPT/Codex pomógł w endpointach, testach, konfiguracji i dokumentacji; wynik sprawdzono przeglądem kodu, testami automatycznymi i rzeczywistymi scenariuszami HTTP opisanymi powyżej.
 
 ## Etap LAB4 — bramka API i dwie niezależne usługi (opis historyczny)
 
@@ -1013,7 +1210,7 @@ Poniższe pięć komponentów i przykłady bez JWT opisują historyczny stan LAB
 ```bash
 export DATABASE_URL='sqlite:///./inventory.db'
 export REDIS_URL='redis://127.0.0.1:6379/0'
-export CACHE_PREFIX='lab4:131413:131427:warehouse'
+export CACHE_PREFIX='lab4:local:warehouse'
 export CACHE_TTL_SECONDS=60
 export EUREKA_SERVER_URL='http://127.0.0.1:8761'
 export SERVICE_PORT=8101
@@ -1025,7 +1222,7 @@ export SERVICE_PORT=8101
 ```bash
 export OUTBOUND_DATABASE_URL='sqlite:///./outbound.db'
 export REDIS_URL='redis://127.0.0.1:6379/0'
-export CACHE_PREFIX='lab4:131413:131427:warehouse'
+export CACHE_PREFIX='lab4:local:warehouse'
 export CACHE_TTL_SECONDS=60
 export EUREKA_SERVER_URL='http://127.0.0.1:8761'
 export SERVICE_PORT=8102
@@ -1038,7 +1235,7 @@ Na Windows kroki 3 i 4 wykonaj w osobnych oknach PowerShell:
 # Inventory
 $env:DATABASE_URL = 'sqlite:///./inventory.db'
 $env:REDIS_URL = 'redis://127.0.0.1:6379/0'
-$env:CACHE_PREFIX = 'lab4:131413:131427:warehouse'
+$env:CACHE_PREFIX = 'lab4:local:warehouse'
 $env:CACHE_TTL_SECONDS = '60'
 $env:EUREKA_SERVER_URL = 'http://127.0.0.1:8761'
 $env:SERVICE_PORT = '8101'
@@ -1049,7 +1246,7 @@ $env:SERVICE_PORT = '8101'
 # Outbound — osobny terminal
 $env:OUTBOUND_DATABASE_URL = 'sqlite:///./outbound.db'
 $env:REDIS_URL = 'redis://127.0.0.1:6379/0'
-$env:CACHE_PREFIX = 'lab4:131413:131427:warehouse'
+$env:CACHE_PREFIX = 'lab4:local:warehouse'
 $env:CACHE_TTL_SECONDS = '60'
 $env:EUREKA_SERVER_URL = 'http://127.0.0.1:8761'
 $env:SERVICE_PORT = '8102'
@@ -1154,7 +1351,7 @@ Czasy około 35 s i 47 s wyliczono z timestampów pierwszej i końcowej odpowied
 
 Brak X-Gateway sam w sobie nie dowodzi braku trasy: w wykonanych eksperymentach filtr nie dołączał go również do błędów połączenia i braku instancji generowanych przez Gateway. Należy porównać kod, ciało odpowiedzi i logi. X-Cache występuje na szczegółach stanów i zamówień, nie na listach, zapisach ani odpowiedzi złożonej stock-check. Samo `/health` nie dowodzi dostępności zależności. Nie testowano wielu instancji, nagłego zabicia procesu bez wyrejestrowania ani wymuszonego timeoutu 504. Ograniczenia cache-aside i SQLite z LAB2 pozostają aktualne.
 
-### Źródła techniczne (EK_03) i autorzy
+### Źródła techniczne (EK_03)
 
 Materiały prowadzącego: [instrukcja LAB4](https://pawoom.lazysolutions.pl/2026_2027/lab4/), [pakiet LAB4](https://pawoom.lazysolutions.pl/2026_2027/lab4/lab4-support.zip) i [pakiet LAB3](https://pawoom.lazysolutions.pl/2026_2027/lab3/lab3-support.zip). Z pakietów przeniesiono infrastrukturę Java (POM-y, klasy startowe) i dostosowano YAML do własnej domeny. Układ sekcji dokumentacji oparto na szablonie README-LAB4. Nie przenoszono usług demonstracyjnych ani ich modeli.
 
@@ -1167,7 +1364,6 @@ Materiały prowadzącego: [instrukcja LAB4](https://pawoom.lazysolutions.pl/2026
 
 Dokumentacja online opisuje linię 5.0 i może wskazywać nowszy patch niż zależności BOM z pakietu prowadzącego. Działanie konfiguracji zweryfikowano na wersjach rzeczywiście zbudowanych z POM-ów.
 
-Autorzy projektu: **131427** — wcześniejszy deklarowany zakres Outbound/Redis; **131413** — wcześniejszy deklarowany zakres Inventory/SQLAlchemy. Dla LAB4 nie przypisujemy autorom niepotwierdzonych czynności. Implementację rozdzielenia procesów, adapter Eureki, konfigurację bramki, testy, skrypt eksperymentów i dokumentację przygotował Codex na polecenie użytkownika. Weryfikacja AI obejmowała przeczytanie instrukcji i źródeł, uruchomienie 73 wcześniejszych testów przed zmianami, 83 testów po zmianach, zbudowanie obu projektów Maven, 7 testów integracyjnych oraz rzeczywiste eksperymenty z zapisanym raportem. Każdy autor powinien samodzielnie przeanalizować konfigurację i przećwiczyć zmianę prefiksu przed odbiorem; nie deklarujemy, że taki odbiór już się odbył.
 
 Wersja do przekazania pozostaje w tym repozytorium. `.gitignore` wyklucza `.venv`, cache Pythona, lokalne bazy, `.env` i katalogi `target` obu projektów Maven. Nie utworzono automatycznie commita, tagu ani publikacji. Po przeglądzie można utworzyć commit etapu i tag `lab4` zgodnie z instrukcją; istniejącego tagu nie należy nadpisywać.
 
@@ -1289,7 +1485,7 @@ Oryginalne demo prowadzącego: 4 testy przeszły, 1 nie przeszedł. W `test_miss
 
 Własne testy to m.in. `test_event_waits_for_consume_and_invalidates_cache`, `test_duplicate_and_extra_fields_apply_once`, `test_invalid_operations_do_not_publish` i `test_broker_outage_keeps_pending_fact_and_sync_recovers`. Sprawdzono też trwałość deduplikacji po restarcie, naprawę cache po błędzie DEL, brak ACK przed powodzeniem handlera i dostęp do operacji odbioru wyłącznie dla SHIPPING/ADMIN. Wcześniejsze reguły biznesowe zachowano; testy wysyłki uwzględniają teraz osobny moment odbioru.
 
-### Ograniczenia, dokumentacja i autorzy
+### Ograniczenia i dokumentacja
 
 Zapis Shipping i publikacja nie tworzą jednej transakcji rozproszonej. Pending oraz odtwarzalny event_id pozwalają ponowić powiadomienie po przerwaniu procesu; nie ma pełnej tabeli Transactional Outbox ani automatycznego publikatora. Dostarczenie może nastąpić więcej niż raz. Błędna wiadomość zatrzymuje bieżącą partię, pozostaje w kolejce i wymaga interwencji; nie ma DLQ. Zastosowano pojedynczy broker, bez klastra i bez gwarantowanego czasu przetworzenia. Eureka i Gateway pozostają poza Dockerem.
 
@@ -1300,4 +1496,3 @@ Zapis Shipping i publikacja nie tworzą jednej transakcji rozproszonej. Pending 
 | [RabbitMQ — queues](https://www.rabbitmq.com/docs/queues) | Trwała kolejka i buforowanie | durable, persistent, wolumen; rzeczywisty test zatrzymanego konsumenta i restart brokera |
 | [Pika — BlockingConnection/Channel](https://pika.readthedocs.io/en/stable/modules/adapters/blocking.html) | Publikacja i ręczny odbiór AMQP | basic_publish/basic_get/basic_ack/basic_nack, timeouty i zamykanie połączeń; pika 1.5.0 |
 
-Zakres i decyzje projektowe ustalono z Radosławem Cebulą. Implementację, testy i dokumentację LAB5 przygotował Codex na jego polecenie. Weryfikacja objęła 120 testów przed zmianami, cały zestaw po zmianach, uruchomienie wszystkich usług i eksperymenty na rzeczywistym RabbitMQ. Podział wcześniejszej pracy autorów znajduje się w LAB2/LAB4.
