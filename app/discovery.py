@@ -2,6 +2,7 @@
 import os
 
 from py_eureka_client.eureka_client import EurekaClient
+from app.documentation import documentation_settings
 
 
 def create_eureka_client(domain: str) -> EurekaClient:
@@ -13,7 +14,7 @@ def create_eureka_client(domain: str) -> EurekaClient:
         instance_ip=os.getenv("INSTANCE_IP", "127.0.0.1"),
         instance_host=os.getenv("INSTANCE_HOST", "localhost"),
         instance_port=int(os.getenv("SERVICE_PORT", str(port))),
-        home_page_url="/docs",
+        home_page_url=documentation_settings(domain).get("docs_url", "/docs"),
         status_page_url="/ready",
         health_check_url="/health",
         should_discover=domain in {"outbound", "shipping"},

@@ -2,6 +2,9 @@
 
 ## LAB6 — cały system w Docker Compose
 
+Swagger UI przez Gateway: `http://127.0.0.1:8080/docs/auth`, `/docs/inventory`, `/docs/outbound` i `/docs/shipping`. Zaloguj się w Auth, a następnie wklej sam token JWT w **Authorize** na stronie wybranej usługi. Przycisk **Execute** wywołuje API przez `/api` na porcie 8080. Ustawienie `SWAGGER_GATEWAY_ENABLED=true` w Compose konfiguruje adresy dokumentacji; tryb lokalny zachowuje `/docs`.
+
+
 Aktualny sposób uruchamiania to **Docker Compose**. Cztery mikrousługi, Eureka, Redis, RabbitMQ i Gateway działają w kontenerach. Dodatkowy kontener `init-keys` wykonuje jednorazową inicjalizację kluczy i kończy pracę kodem `0`; jego stan `Exited (0)` jest prawidłowy. Dokumentacja wcześniejszych etapów poniżej zachowuje historyczne przykłady uruchamiania na hoście.
 
 ### Uruchomienie i pierwsze konto

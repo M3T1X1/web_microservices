@@ -17,6 +17,22 @@ spring:
           default-filters:
             - AddResponseHeader=X-Gateway, lab4
           routes:
+            - id: inventory-swagger
+              uri: lb://INVENTORY-SERVICE
+              predicates:
+                - Path=/docs/inventory,/docs/inventory/**
+            - id: outbound-swagger
+              uri: lb://OUTBOUND-SERVICE
+              predicates:
+                - Path=/docs/outbound,/docs/outbound/**
+            - id: shipping-swagger
+              uri: lb://SHIPPING-SERVICE
+              predicates:
+                - Path=/docs/shipping,/docs/shipping/**
+            - id: auth-swagger
+              uri: lb://AUTH-SERVICE
+              predicates:
+                - Path=/docs/auth,/docs/auth/**
             - id: inventory-stocks
               uri: lb://INVENTORY-SERVICE
               predicates:

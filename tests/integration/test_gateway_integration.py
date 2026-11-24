@@ -75,6 +75,28 @@ def test_gateway_does_not_publish_technical_endpoints(gateway_client):
         assert "x-gateway" not in response.headers
 
 
+def test_swagger_schemas_use_gateway_and_only_publish_routed_operations(gateway_client):
+    allowed = {
+        "inventory": ("/stocks", "/receipts"),
+        "outbound": ("/orders",),
+        "shipping": ("/shipments",),
+        "auth": ("/auth",),
+    }
+    for service, prefixes in allowed.items():
+        docs_path = f"/docs/{service}"
+        response = gateway_client.get(docs_path)
+        assert_gateway(response)
+        assert "SwaggerUIBundle" in response.text
+        assert f"{docs_path}/openapi.json" in response.text
+        response = gateway_client.get(f"{docs_path}/openapi.json")
+        assert_gateway(response)
+        schema = response.json()
+        assert schema["servers"][0]["url"] == "/api"
+        assert schema["paths"]
+        assert all(path.startswith(prefixes) for path in schema["paths"])
+        assert schema["components"]["securitySchemes"]["HTTPBearer"]["scheme"] == "bearer"
+
+
 def test_outbound_order_write_and_read(gateway_client):
     body = {"recipient_name": "Test LAB4", "recipient_phone": "123456789",
             "recipient_address": f"Test {uuid4().hex}", "items": [{"sku": "SKU-001", "quantity": 1}]}

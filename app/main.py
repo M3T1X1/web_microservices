@@ -15,6 +15,7 @@ from app.db_models import OrderDispatchRow, OrderRow, ProcessedEventRow, Receipt
 from app.messaging import BrokerUnavailableError, RabbitEventBroker
 from app.models.events import OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY
 from app.discovery import create_eureka_client
+from app.documentation import documentation_settings
 from app.repositories import OrderRepository, ReceiptRepository, StockRepository
 from app.routers import allocations, health, orders, receipts, shipments, stocks
 from app.security import TokenVerifier, require_roles
@@ -101,19 +102,20 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
             yield
 
     app = FastAPI(title=f"Magazyn — {domain}", version="0.5.0",
-                  description="System magazynowy: dane własnej domeny w SQLite, JWT i Eureka.", lifespan=lifespan)
+                  description="System magazynowy: dane własnej domeny w SQLite, JWT i Eureka.", lifespan=lifespan,
+                  **documentation_settings(domain))
     if domain == "both":
         app.include_router(health.router)
     if inventory_enabled:
         app.include_router(stocks.router, dependencies=[Depends(require_roles("WAREHOUSE"))])
-        app.include_router(allocations.router)
+        app.include_router(allocations.router, include_in_schema=False)
         app.include_router(receipts.router, dependencies=[Depends(require_roles("WAREHOUSE"))])
     if outbound_enabled:
         app.include_router(orders.router)
     if domain == "shipping":
         app.include_router(shipments.router)
     if domain != "both":
-        @app.get("/health")
+        @app.get("/health", include_in_schema=False)
         def service_health():
             return {"status": "ok", "service": f"{domain.upper()}-SERVICE"}
 
@@ -121,7 +123,7 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
     async def database_error(request: Request, exc: SQLAlchemyError):
         return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
 
-    @app.get("/ready")
+    @app.get("/ready", include_in_schema=False)
     def readiness(request: Request):
         databases = {}
         for name, engine in request.app.state.databases.items():

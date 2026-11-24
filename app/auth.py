@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import Base, make_database
 from app.db_models import UserRow
 from app.discovery import create_eureka_client
+from app.documentation import documentation_settings
 from app.routers.auth import router
 from app.security import TokenVerifier
 from app.services.auth import AuthService
@@ -58,14 +59,15 @@ def create_auth_app(*, database_url=None, private_key=None, token_verifier=None,
                 broker.close()
                 engine.dispose()
 
-    app = FastAPI(title="Magazyn — Auth", version="0.5.0", lifespan=lifespan)
+    app = FastAPI(title="Magazyn — Auth", version="0.5.0", lifespan=lifespan,
+                  **documentation_settings("auth"))
     app.include_router(router)
 
-    @app.get("/health")
+    @app.get("/health", include_in_schema=False)
     def health():
         return {"status": "ok", "service": "AUTH-SERVICE"}
 
-    @app.get("/ready")
+    @app.get("/ready", include_in_schema=False)
     def ready():
         with app.state.engine.connect() as db:
             db.execute(text("SELECT 1"))

@@ -1,6 +1,36 @@
 # Ręczne testowanie projektu i komunikacji mikrousług
 
-Instrukcja dotyczy uruchomienia całego systemu przez `compose.yaml`. Żądania HTTP wykonuj w Postmanie lub Insomnii. Polecenia `docker compose` uruchamiaj w terminalu, w głównym katalogu projektu. Nie trzeba uruchamiać Pythona ani Mavena na hoście.
+## Mikrousługi i ich odpowiedzialność
+
+Projekt składa się z czterech mikrousług. Każda działa w osobnym kontenerze i przechowuje dane swojej domeny we własnej bazie SQLite.
+
+| Mikrousługa | Odpowiedzialność | API przez Gateway | Własna baza |
+|---|---|---|---|
+| **Inventory** | Stany i lokalizacje towarów, przyjęcia dostaw oraz rezerwacje ilości dla zamówień. Przyjęcia są częścią Inventory, nie osobną mikrousługą. | `/api/stocks`, `/api/receipts` | `inventory.db` |
+| **Outbound** | Tworzenie i odczyt zamówień, rezerwowanie towaru przez API Inventory, pakowanie oraz zmiana zamówienia na SHIPPED po odebraniu zdarzenia wysyłki. Przechowuje również informacje do deduplikacji zdarzeń. | `/api/orders` | `outbound.db` |
+| **Shipping** | Tworzenie przesyłek dla spakowanych zamówień, przygotowanie do wysyłki i wydanie kurierowi. Sprawdza zamówienie przez API Outbound i publikuje zdarzenie `ShipmentHandedOver` do RabbitMQ. | `/api/shipments` | `shipping.db` |
+| **Auth** | Konta użytkowników, hashowanie haseł, logowanie, wydawanie tokenów JWT oraz zarządzanie rolami ADMIN, WAREHOUSE i SHIPPING. Pozostałe mikrousługi samodzielnie sprawdzają JWT i wymagane role. | `/api/auth` | `auth.db` |
+
+Usługi komunikują się przez HTTP i zdarzenia, bez bezpośredniego dostępu do cudzych baz. Główne zależności to **Outbound → Inventory** przy rezerwacji, **Shipping → Outbound** przy sprawdzaniu zamówienia oraz **Shipping → RabbitMQ → Outbound** przy potwierdzaniu wysyłki.
+
+Dodatkowo działają komponenty infrastruktury: **Gateway** udostępnia wspólne wejście HTTP na `127.0.0.1:8080`, **Eureka** przechowuje rejestr adresów usług, **Redis** zapewnia cache, a **RabbitMQ** przekazuje zdarzenia. `init-keys` jest jednorazowym zadaniem przygotowującym klucze JWT.
+
+Instrukcja dotyczy uruchomienia całego systemu przez `compose.yaml`. Żądania HTTP wykonuj w Swagger UI w przeglądarce albo w Postmanie lub Insomnii. Polecenia `docker compose` uruchamiaj w terminalu, w głównym katalogu projektu. Nie trzeba uruchamiać Pythona ani Mavena na hoście.
+
+## Testowanie w przeglądarce — Swagger UI
+
+Po uruchomieniu Compose otwórz wybraną stronę:
+
+| Mikrousługa | Adres Swagger UI |
+|---|---|
+| Auth | http://127.0.0.1:8080/docs/auth |
+| Inventory | http://127.0.0.1:8080/docs/inventory |
+| Outbound | http://127.0.0.1:8080/docs/outbound |
+| Shipping | http://127.0.0.1:8080/docs/shipping |
+
+Na stronie Auth rozwiń `POST /auth/login`, kliknij **Try it out**, podaj email i hasło, a następnie kliknij **Execute**. Skopiuj wartość `access_token` z odpowiedzi. Na stronie wybranej mikrousługi kliknij **Authorize** i wklej sam token, bez dopisku `Bearer`. Zatwierdź i zamknij okno. Autoryzację ustaw osobno na każdej stronie.
+
+Teraz możesz wykonywać poniższe scenariusze przyciskami **Try it out → Execute**. W Swaggerze wybierasz ścieżki bez `/api`, np. `/stocks`; ustawiony serwer `/api` dodaje ten prefiks automatycznie. Wszystkie wywołania trafiają przez Gateway na port 8080. Formularze wymagają identyfikatorów rekordów z wcześniejszych odpowiedzi. Endpointy techniczne i wewnętrzna rezerwacja zbiorcza nie są częścią publicznej dokumentacji.
 
 ## 1. Uruchomienie i sposób wykonywania żądań
 
