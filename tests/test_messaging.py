@@ -67,7 +67,7 @@ def test_invalid_operations_do_not_publish(world):
     assert client.post(f"/shipments/{shipment['id']}/hand-over", headers=headers).status_code == 409
     assert client.post(f"/shipments/{uuid4()}/hand-over", headers=headers).status_code == 404
     assert client.post('/shipments', headers=headers, json={
-        'order_id': shipment['order_id'], 'carrier': 'Test', 'weight_kg': -1}).status_code == 422
+        'order_id': shipment['order_id'], 'destination_address': 'Warszawa, Testowa 1', 'courier_id': '22222222-2222-4222-8222-222222222222', 'weight_kg': -1}).status_code == 422
     assert client.app.state.event_broker.published == []
 
 

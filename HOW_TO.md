@@ -230,7 +230,8 @@ POST BASE/api/shipments
 ```json
 {
   "order_id": "<rzeczywisty ORDER_ID>",
-  "carrier": "Kurier testowy",
+  "destination_address": "Warszawa, Testowa 1",
+  "courier_id": "22222222-2222-4222-8222-222222222222",
   "weight_kg": 1.5
 }
 ```

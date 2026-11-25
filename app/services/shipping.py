@@ -16,7 +16,8 @@ from app.repositories import write_transaction
 
 
 def shipment_payload(row):
-    return Shipment(id=row.id, order_id=row.order_id, carrier=row.carrier, weight_kg=row.weight_kg,
+    return Shipment(id=row.id, order_id=row.order_id, destination_address=row.destination_address,
+                    courier_id=row.courier_id, weight_kg=row.weight_kg,
                     status=row.status, handed_over_at=row.handed_over_at,
                     notification_pending=row.notification_pending)
 

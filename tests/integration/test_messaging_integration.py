@@ -18,7 +18,7 @@ def test_duplicate_message_updates_order_once_and_invalidates_cache(gateway_clie
     assert client.post(order_path + '/pack').status_code == 200
     client.get(order_path)
     assert client.get(order_path).headers['x-cache'] == 'HIT'
-    created = client.post('/api/shipments', json={'order_id': order['id'], 'carrier': 'Test', 'weight_kg': 1})
+    created = client.post('/api/shipments', json={'order_id': order['id'], 'destination_address': 'Warszawa, Testowa 1', 'courier_id': '22222222-2222-4222-8222-222222222222', 'weight_kg': 1})
     assert created.status_code == 201
     shipment_path = f"/api/shipments/{created.json()['id']}"
     assert client.post(shipment_path + '/ready').status_code == 200

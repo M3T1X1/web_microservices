@@ -35,7 +35,7 @@ def test_full_reservation_packing_shipping_via_gateway(gateway_client, stock):
     assert gateway_client.post(order_path + '/pack').json()['status'] == 'PACKED'
     gateway_client.get(order_path)
     assert gateway_client.get(order_path).headers['x-cache'] == 'HIT'
-    response = gateway_client.post('/api/shipments', json={'order_id': order_id, 'carrier': 'Kurier testowy', 'weight_kg': 1.5})
+    response = gateway_client.post('/api/shipments', json={'order_id': order_id, 'destination_address': 'Warszawa, Testowa 1', 'courier_id': '22222222-2222-4222-8222-222222222222', 'weight_kg': 1.5})
     assert response.status_code == 201, response.text
     path = f"/api/shipments/{response.json()['id']}"
     assert gateway_client.post(path + '/ready').json()['status'] == 'READY'
@@ -68,7 +68,7 @@ def test_shipping_rejects_unpacked_order_without_creating_shipment(gateway_clien
     order = gateway_client.post('/api/orders', json={'recipient_name': 'A', 'recipient_phone': '1',
         'recipient_address': 'B', 'items': [{'sku': stock['sku'], 'quantity': 1}]}).json()
     before = gateway_client.get('/api/shipments').json()
-    response = gateway_client.post('/api/shipments', json={'order_id': order['id'], 'carrier': 'Test', 'weight_kg': 1})
+    response = gateway_client.post('/api/shipments', json={'order_id': order['id'], 'destination_address': 'Warszawa, Testowa 1', 'courier_id': '22222222-2222-4222-8222-222222222222', 'weight_kg': 1})
     assert response.status_code == 409
     assert response.json() == {'detail': 'Order must be packed before shipping'}
     assert gateway_client.get('/api/shipments').json() == before

@@ -104,9 +104,39 @@ def new_shipment(world):
     clients, tokens, _, _ = world
     order = packed_order(world)
     response = clients["shipping"].post("/shipments", headers=tokens["SHIPPING"],
-        json={"order_id": order["id"], "carrier": "Kurier testowy", "weight_kg": 2.5})
+        json={"order_id": order["id"], "destination_address": "Warszawa, Testowa 1", "courier_id": "22222222-2222-4222-8222-222222222222", "weight_kg": 2.5})
     assert response.status_code == 201, response.text
     return order, response.json()
+
+
+def test_shipping_persists_destination_address_and_courier_id(world):
+    clients, tokens, _, _ = world
+    _, shipment = new_shipment(world)
+    assert shipment['destination_address'] == 'Warszawa, Testowa 1'
+    assert shipment['courier_id'] == '22222222-2222-4222-8222-222222222222'
+    assert 'carrier' not in shipment
+    shipping, headers = clients['shipping'], tokens['SHIPPING']
+    assert shipping.get(f"/shipments/{shipment['id']}", headers=headers).json() == shipment
+    assert shipping.get('/shipments', headers=headers).json() == [shipment]
+
+
+def test_shipping_rejects_missing_address_invalid_courier_and_legacy_carrier(world):
+    clients, tokens, bridge, _ = world
+    body = {'order_id': str(uuid4()), 'destination_address': 'Warszawa, Testowa 1',
+            'courier_id': '22222222-2222-4222-8222-222222222222', 'weight_kg': 1}
+    invalid = [
+        {key: value for key, value in body.items() if key != field}
+        for field in ('destination_address', 'courier_id')
+    ]
+    invalid.extend({**body, 'destination_address': value} for value in ('', '   ', None))
+    invalid.extend({**body, 'courier_id': value} for value in ('Kurier testowy', '', 123, None))
+    invalid.append({**body, 'carrier': 'Kurier testowy'})
+    invalid.append({'order_id': body['order_id'], 'carrier': 'Kurier testowy', 'weight_kg': 1})
+    for payload in invalid:
+        response = clients['shipping'].post('/shipments', headers=tokens['SHIPPING'], json=payload)
+        assert response.status_code == 422, response.text
+    assert bridge.calls == []
+    assert clients['shipping'].get('/shipments', headers=tokens['SHIPPING']).json() == []
 
 
 def test_auth_hashes_password_and_never_returns_it(world):
@@ -244,7 +274,7 @@ def test_lost_publish_confirmation_can_be_retried_without_double_dispatch(world,
 def test_shipping_enforces_packed_order_and_duplicate_shipment(world):
     clients, tokens, _, _ = world
     order, shipment = new_shipment(world)
-    body = {"order_id": order["id"], "carrier": "Test", "weight_kg": 1}
+    body = {"order_id": order["id"], "destination_address": "Warszawa, Testowa 1", "courier_id": "22222222-2222-4222-8222-222222222222", "weight_kg": 1}
     assert clients["shipping"].post("/shipments", headers=tokens["SHIPPING"], json=body).status_code == 409
     body["order_id"] = str(uuid4())
     assert clients["shipping"].post("/shipments", headers=tokens["SHIPPING"], json=body).status_code == 404
@@ -300,7 +330,7 @@ def test_shipping_can_cancel_and_invalid_input_does_not_create_rows(world):
         assert clients['shipping'].post(path + '/' + action, headers=headers).status_code == 409
     for weight in (0, -1, True, 'invalid'):
         response = clients['shipping'].post('/shipments', headers=headers,
-            json={'order_id': str(uuid4()), 'carrier': 'Test', 'weight_kg': weight})
+            json={'order_id': str(uuid4()), 'destination_address': 'Warszawa, Testowa 1', 'courier_id': '22222222-2222-4222-8222-222222222222', 'weight_kg': weight})
         assert response.status_code == 422
     assert len(clients['shipping'].get('/shipments', headers=headers).json()) == 1
 

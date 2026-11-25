@@ -374,7 +374,7 @@ Poniżej ścieżki widziane przez klienta Gateway (:8080); `StripPrefix=1` usuwa
 | POST `/api/orders/{id}/reserve` | Rezerwacja wszystkich pozycji przez Inventory i status RESERVED | WAREHOUSE, ADMIN |
 | POST `/api/orders/{id}/pack` | RESERVED → PACKED | WAREHOUSE, ADMIN |
 | POST `/api/orders/consume-events` | Ręczny odbiór zdarzeń z RabbitMQ; domyślnie maksymalnie 50 | SHIPPING, ADMIN |
-| POST `/api/shipments` | order_id, carrier, weight_kg; nowe NEW, sukces 201 | SHIPPING, ADMIN |
+| POST `/api/shipments` | order_id, destination_address, courier_id, weight_kg; nowe NEW, sukces 201 | SHIPPING, ADMIN |
 | GET `/api/shipments`, GET `/api/shipments/{id}` | Lista i szczegóły przesyłek | SHIPPING, ADMIN |
 | POST `/api/shipments/{id}/ready` | NEW → READY; sprawdza PACKED w Outbound | SHIPPING, ADMIN |
 | POST `/api/shipments/{id}/hand-over` | READY → HANDED_OVER, czas UTC i publikacja zdarzenia do RabbitMQ | SHIPPING, ADMIN |
@@ -383,6 +383,8 @@ Poniżej ścieżki widziane przez klienta Gateway (:8080); `StripPrefix=1` usuwa
 
 Shipping rejestruje przesyłkę wyłącznie dla istniejącego zamówienia PACKED i ponownie sprawdza stan przed przygotowaniem oraz wydaniem. Outbound udostępnia Shipping bezpośredni odczyt bazy (`/orders/{id}/shipping-check`), aby decyzja nie opierała się na potencjalnie starej kopii Redis. Po wydaniu Shipping publikuje `ShipmentHandedOver`. Dopiero ręczny odbiór w Outbound zmienia PACKED → SHIPPED, zapisuje identyfikator przesyłki i zdarzenia oraz usuwa cache zamówienia. Duplikaty są rozpoznawane po event_id. Dotychczasowe `POST /orders/{id}/dispatch` pozostaje zgodne z wcześniejszym API: ten sam shipment_id jest idempotentny, inny daje 409. Odczyt Shipping, dispatch i odbiór zdarzeń wymagają SHIPPING/ADMIN.
 
+Przesyłka wymaga `destination_address` (adres docelowy) i `courier_id` (UUID kuriera). Pole `carrier` nie jest już obsługiwane. Adres jest zapisywany w przesyłce niezależnie od `recipient_address` zamówienia. System nie prowadzi rejestru kurierów, więc sprawdza format UUID, a nie istnienie kuriera. Zmiana wymaga aktualizacji istniejącej tabeli `shipments`: `create_all()` nie migruje starej kolumny `carrier`. Migrację SQLite z zachowaniem danych wykonuje `scripts/migrate_shipping.py`. Po zatrzymaniu Shipping uruchom `python scripts/migrate_shipping.py --database /sciezka/shipping.db < addresses.json`, gdzie plik JSON zawiera mapowanie UUID zamówienia na jego `recipient_address` z Outbound. Skrypt tworzy kopię bazy i plik mapowania dawnych nazw kurierów na deterministyczne UUID obok bazy, zachowuje identyfikatory, statusy i oczekujące powiadomienia oraz przerywa migrację przy brakującym adresie. UUID nadane dawnym nazwom identyfikują wpisy historyczne; nie oznaczają powiązania z użytkownikami Auth. Powtórne uruchomienie po migracji nie zmienia danych. Następnie uruchom Shipping z aktualnym kodem.
+
 Przykłady JSON:
 
 ```json
@@ -390,7 +392,7 @@ Przykłady JSON:
 ```
 
 ```json
-{"order_id":"UUID-spakowanego-zamowienia","carrier":"Firma kurierska","weight_kg":2.5}
+{"order_id":"UUID-spakowanego-zamowienia","destination_address":"Warszawa, Testowa 1","courier_id":"22222222-2222-4222-8222-222222222222","weight_kg":2.5}
 ```
 
 Każde żądanie domenowe wymaga `Authorization: Bearer <access_token>`. Gateway przekazuje ten nagłówek, a wywołania HTTP Outbound → Inventory i Shipping → Outbound zachowują token użytkownika oraz `Content-Type: application/json` przy wysyłaniu JSON. Zdarzenie RabbitMQ nie zawiera tokenu; operacja uruchamiająca odbiór wymaga JWT. Bramka nie sprawdza reguł biznesowych i nie łączy się z bazami.
@@ -535,7 +537,7 @@ Para `(sku, location)` jest unikalna w bazie Inventory.
 
 ### Shipping — `Shipment` (planowana usługa)
 
-`Shipment`: `id` — UUID serwera; `order_id` — UUID zamówienia; `carrier` — niepusty tekst; `weight_kg` — liczba > 0; `status` — początkowo `NEW`; `handed_over_at` — data i godzina wydania, początkowo brak.
+`Shipment`: `id` — UUID serwera; `order_id` — UUID zamówienia; `destination_address` — niepusty adres docelowy przesyłki; `courier_id` — UUID kuriera; `weight_kg` — liczba > 0; `status` — początkowo `NEW`; `handed_over_at` — data i godzina wydania, początkowo brak.
 
 **Reguła:** tylko przesyłkę `READY` można wydać kurierowi; otrzymuje wtedy status `HANDED_OVER` i czas wydania. Niedozwolona operacja zwraca `409` bez zmiany danych.
 
@@ -799,7 +801,8 @@ Jeden rekord opisuje jedną paczkę.
 |---|---|
 | `id` | Identyfikator przesyłki |
 | `order_id` | Identyfikator zamówienia |
-| `carrier` | Firma kurierska |
+| `destination_address` | Adres docelowy przesyłki |
+| `courier_id` | Identyfikator kuriera (UUID) |
 | `weight_kg` | Waga paczki w kilogramach |
 | `status` | Etap wysyłki |
 | `handed_over_at` | Data i godzina wydania kurierowi |
