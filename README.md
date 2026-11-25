@@ -2,6 +2,8 @@
 
 ## LAB6 — cały system w Docker Compose
 
+Panel testowy wszystkich mikroserwisów: **http://127.0.0.1:8080/**. Jest serwowany przez Gateway, bez dodatkowego serwera frontendu i zależności Node. Zaloguj się istniejącym kontem; rola ADMIN pozwala przejść cały proces. Panel zawiera operacje Inventory (stany i przyjęcia), Outbound, Shipping i Auth, edytor żądań JSON, porównanie oczekiwanego HTTP z odpowiedzią oraz cztery automatyczne scenariusze warunków brzegowych. Szczegółowy opis: [HOW_TO.md — panel testowy](HOW_TO.md#panel-testowy-mikroserwisów).
+
 Swagger UI przez Gateway: `http://127.0.0.1:8080/docs/auth`, `/docs/inventory`, `/docs/outbound` i `/docs/shipping`. Zaloguj się w Auth, a następnie wklej sam token JWT w **Authorize** na stronie wybranej usługi. Przycisk **Execute** wywołuje API przez `/api` na porcie 8080. Ustawienie `SWAGGER_GATEWAY_ENABLED=true` w Compose konfiguruje adresy dokumentacji; tryb lokalny zachowuje `/docs`.
 
 

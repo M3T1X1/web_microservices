@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Magazyn — laboratorium mikroserwisów</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Magazyn, strona główna"><span class="brand-mark">M</span><span>Magazyn<small>LABORATORIUM API</small></span></a>
+    <p class="nav-label">OBSZAR TESTÓW</p>
+    <nav aria-label="Mikroserwisy">
+      <button class="nav-item active" data-view="scenarios"><span class="nav-icon">◎</span>Scenariusze<span class="nav-count">4</span></button>
+      <button class="nav-item" data-view="inventory"><span class="nav-icon">▦</span>Inventory<small>Stany i przyjęcia</small></button>
+      <button class="nav-item" data-view="outbound"><span class="nav-icon">▤</span>Outbound<small>Zamówienia</small></button>
+      <button class="nav-item" data-view="shipping"><span class="nav-icon">▱</span>Shipping<small>Przesyłki</small></button>
+      <button class="nav-item" data-view="auth"><span class="nav-icon">◇</span>Auth<small>Użytkownicy i role</small></button>
+    </nav>
+    <div class="sidebar-bottom"><span class="environment">ŚRODOWISKO LOKALNE</span><p>API Gateway · ten sam adres</p><a href="/docs/inventory" target="_blank" rel="noopener">Dokumentacja API</a></div>
+  </aside>
+
+  <div class="shell">
+    <header class="topbar"><span>Panel deweloperski <span class="separator">/</span> <strong id="breadcrumb">Scenariusze</strong></span><div class="top-actions"><span id="session-status" class="session-label">Brak sesji</span><button id="session-open" class="button small">Zaloguj się</button><button id="logout" class="button small" hidden>Wyloguj</button></div></header>
+    <main>
+      <div class="page-heading"><div><p class="eyebrow">MAGAZYN / MIKROSERWISY</p><h1 id="page-title">Sprawdź cały proces.</h1><p id="page-subtitle" class="muted">Poprawna ścieżka i warunki brzegowe. Rzeczywiste żądania, widoczne odpowiedzi.</p></div><button id="refresh" class="button">Odśwież dane</button></div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <section id="service-cards" class="service-grid" aria-label="Dostępność API"></section>
+
+      <section id="scenarios-view">
+        <div class="section-heading"><div><h2>Scenariusze testowe</h2><p class="muted">Uruchom pojedynczy test i porównaj wynik z oczekiwanym kodem HTTP.</p></div><span class="tag">Bez blokowania błędnych operacji</span></div>
+        <div class="process"><span>Przyjęcie towaru</span><span class="process-line"></span><span>Rezerwacja</span><span class="process-line"></span><span>Pakowanie</span><span class="process-line"></span><span>Wydanie kurierowi</span><span class="process-line"></span><span>Odbiór zdarzenia</span></div>
+        <div class="scenario-grid" id="scenario-cards"></div>
+        <div class="notice subtle">Scenariusze magazynowe tworzą dane z unikalnym SKU <code>UI-…</code> i dostawcą „Panel testowy”. Dane pozostają w bazie. Odbiór zdarzeń przetwarza również wcześniejsze wiadomości z kolejki. Pełny proces wymaga roli ADMIN oraz działającego RabbitMQ.</div>
+        <section id="scenario-results-panel" class="panel" hidden><div class="panel-heading"><h2 id="scenario-result-title">Wyniki scenariusza</h2><span id="scenario-summary" class="tag" role="status"></span></div><div class="table-scroll"><table><thead><tr><th>Krok</th><th>Oczekiwano</th><th>Otrzymano</th><th>Wynik</th></tr></thead><tbody id="scenario-results"></tbody></table></div></section>
+      </section>
+
+      <section id="service-view" hidden>
+        <div class="workspace">
+          <section class="panel"><div class="panel-heading"><h2>Operacje</h2><span id="required-role" class="tag"></span></div><div id="operations" class="operation-list"></div><p class="panel-footnote">Każdą operację możesz wywołać niezależnie od statusu. Reguły sprawdza mikroserwis.</p></section>
+          <section class="panel request-panel"><div class="panel-heading"><h2 id="operation-title">Żądanie</h2><span id="operation-hint" class="muted"></span></div>
+            <form id="request-form" novalidate><div class="request-line"><label>Metoda<select id="request-method"><option>GET</option><option>POST</option><option>PATCH</option><option>DELETE</option><option>PUT</option></select></label><label class="grow">Ścieżka<input id="request-path" spellcheck="false" autocomplete="off" placeholder="/api/orders/{id}/pack"></label></div>
+              <div id="context-fields" class="context-fields"></div>
+              <label id="body-label" for="request-body">Treść żądania (JSON)</label><textarea id="request-body" spellcheck="false" rows="10" aria-labelledby="body-label"></textarea>
+              <div class="request-options"><label>Oczekiwany HTTP<select id="expected-status"><option value="">Bez porównania</option><option>200</option><option>201</option><option>401</option><option>403</option><option>404</option><option>409</option><option>422</option><option>503</option></select></label><label class="checkbox"><input id="send-auth" type="checkbox" checked> Dołącz token sesji</label><button class="button primary" id="send-request" type="submit">Wyślij żądanie</button></div>
+            </form>
+          </section>
+        </div>
+        <section class="panel data-panel"><div class="panel-heading"><div><h2 id="data-title">Dane</h2><p class="muted">Kliknij rekord, aby uzupełnić identyfikatory w żądaniu.</p></div><div id="data-tabs" class="button-group"></div></div><div id="data-content" class="table-scroll"></div></section>
+      </section>
+
+      <section class="panel inspector"><div class="panel-heading"><div><h2>Dziennik żądań</h2><p class="muted">Status HTTP, czas wykonania, żądanie i odpowiedź. Hasła i tokeny są ukrywane.</p></div><button id="clear-history" class="button small">Wyczyść dziennik</button></div><div class="inspector-grid"><div id="history" class="history" aria-label="Historia żądań"><p class="empty">Tu pojawią się wykonane żądania.</p></div><div class="response"><div id="response-meta" class="response-meta">Wybierz żądanie, aby zobaczyć szczegóły.</div><pre id="response-body" tabindex="0">{ }</pre></div></div></section>
+    </main>
+    <footer>Magazyn · Inventory / Outbound / Shipping / Auth <span>Żądania trafiają do rzeczywistych mikroserwisów.</span></footer>
+  </div>
+
+  <dialog id="session-dialog"><form id="login-form" novalidate><div class="panel-heading"><h2>Połącz z Auth</h2><button id="session-close" type="button" class="button small" aria-label="Zamknij">Zamknij</button></div><p class="muted">Użyj istniejącego konta. ADMIN ma dostęp do wszystkich mikroserwisów.</p><label for="login-email">E-mail</label><input id="login-email" type="email" autocomplete="username"><label for="login-password">Hasło</label><input id="login-password" type="password" autocomplete="current-password"><p id="login-message" role="status"></p><button id="login-submit" class="button primary" type="submit">Zaloguj</button><p class="panel-footnote">Token jest przechowywany tylko w pamięci tej karty. Odświeżenie strony kończy sesję panelu.</p></form></dialog>
+</body>
+</html>
