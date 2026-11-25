@@ -222,7 +222,8 @@ Rozwiń **POST /shipments → Try it out**. Wklej JSON, zastępując ID_ZAMOWIEN
 ```json
 {
   "order_id": "ID_ZAMOWIENIA",
-  "carrier": "Kurier testowy",
+  "destination_address": "Warszawa, Testowa 1",
+  "courier_id": "22222222-2222-4222-8222-222222222222",
   "weight_kg": 1.5
 }
 ```

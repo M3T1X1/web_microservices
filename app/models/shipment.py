@@ -9,7 +9,8 @@ from app.models.stock import NonEmptyText
 class ShipmentCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     order_id: UUID
-    carrier: NonEmptyText
+    destination_address: NonEmptyText
+    courier_id: UUID
     weight_kg: float = Field(gt=0, allow_inf_nan=False, strict=True)
 
 

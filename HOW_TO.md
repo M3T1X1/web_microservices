@@ -15,7 +15,41 @@ Usługi komunikują się przez HTTP i zdarzenia, bez bezpośredniego dostępu do
 
 Dodatkowo działają komponenty infrastruktury: **Gateway** udostępnia wspólne wejście HTTP na `127.0.0.1:8080`, **Eureka** przechowuje rejestr adresów usług, **Redis** zapewnia cache, a **RabbitMQ** przekazuje zdarzenia. `init-keys` jest jednorazowym zadaniem przygotowującym klucze JWT.
 
-Instrukcja dotyczy uruchomienia całego systemu przez `compose.yaml`. Żądania HTTP wykonuj w Swagger UI w przeglądarce albo w Postmanie lub Insomnii. Polecenia `docker compose` uruchamiaj w terminalu, w głównym katalogu projektu. Nie trzeba uruchamiać Pythona ani Mavena na hoście.
+Instrukcja dotyczy uruchomienia całego systemu przez `compose.yaml`. Żądania HTTP wykonuj w panelu testowym, Swagger UI w przeglądarce albo w Postmanie lub Insomnii. Polecenia `docker compose` uruchamiaj w terminalu, w głównym katalogu projektu. Nie trzeba uruchamiać Pythona ani Mavena na hoście.
+
+## Panel testowy mikroserwisów
+
+Po uruchomieniu Compose otwórz **http://127.0.0.1:8080/** i kliknij **Zaloguj się**. Użyj istniejącego konta. ADMIN ma dostęp do wszystkich funkcji; WAREHOUSE do operacji magazynowych i zamówień, SHIPPING do przesyłek oraz operacji potwierdzania wysyłki. Panel nie blokuje wysyłania żądań z powodu roli lub statusu rekordu — odpowiedź 403 albo 409 jest częścią testu. Token pozostaje tylko w pamięci karty, więc odświeżenie strony wymaga ponownego logowania.
+
+Wybierz mikroserwis w lewym menu, a następnie operację. Kliknięcie rekordu w tabeli uzupełnia identyfikatory; wybory są pamiętane między zakładkami, np. zamówienie z Outbound można wykorzystać przy tworzeniu przesyłki w Shipping. Możesz zmienić metodę, ścieżkę, dowolny JSON, oczekiwany kod HTTP i wyłączyć dołączanie tokenu. **Wyślij żądanie** wykonuje rzeczywiste wywołanie API. Dziennik zawiera status HTTP, czas, nagłówek `X-Cache` oraz żądanie i odpowiedź z ukrytymi hasłami i tokenami. Żądania ograniczono do `/api/…` i `/health` na tym samym Gateway.
+
+Zakładka **Scenariusze** porównuje wyniki poszczególnych kroków z oczekiwaniami:
+
+| Scenariusz | Sprawdzane warunki |
+|---|---|
+| Najpierw zarezerwuj, potem wyślij | Pakowanie NEW → 409; przesyłka bez PACKED → 409; wydanie przed READY → 409; następnie poprawna rezerwacja, pakowanie, przesyłka, wydanie, publikacja i odbiór zdarzenia RabbitMQ oraz SHIPPED. Ponowna rezerwacja i synchronizacja są idempotentne; druga przesyłka i ponowne wydanie są odrzucane. |
+| Towaru nie może zabraknąć | Rezerwacja ponad stan → 409; ilość zero i stan ujemny → 422; rezerwacja całego stanu; zmniejszenie stanu poniżej rezerwacji → 409; dostępność końcowa zero. |
+| Zatwierdź przed zaksięgowaniem | Księgowanie NEW → 409; zatwierdzenie i księgowanie → 200; ponowne księgowanie i anulowanie POSTED → 409; stan zwiększony dokładnie raz. |
+| Sprawdź granice dostępu | Brak tokenu i błędny token → 401; błędne logowanie → 401; zły format danych → 422; dostęp do usług zgodnie z rolą zalogowanego użytkownika. Uruchom osobno jako ADMIN, WAREHOUSE i SHIPPING. |
+
+Scenariusze magazynowe tworzą nowe dane z unikalnym SKU `UI-…`, dostawcą `Panel testowy` i lokalizacją `UI-TEST`. Dane pozostają w bazach. Scenariusz pełnej wysyłki wymaga ADMIN i RabbitMQ; odbiór zdarzeń może również przetworzyć wcześniejsze wiadomości w kolejce. Test zatrzymuje się na pierwszej niezgodności i pokazuje FAIL ze szczegółami. Czerwony HTTP w ręcznym teście oznacza niezgodność z wybranym oczekiwaniem; oczekiwane 409 albo 422 są wynikiem PASS.
+
+Pliki frontendu znajdują się w `gateway/src/main/resources/static/`. Po ich zmianie wykonaj:
+
+```bash
+docker compose build api-gateway
+docker compose up -d --no-deps api-gateway
+```
+
+Automatyczna weryfikacja w przeglądarce (opcjonalny Playwright na hoście) wykonuje scenariusze i operacje ręczne, sprawdza trzy role, cache, ukrywanie haseł oraz widok mobilny. Tworzy dwa konta testowe i wyłącza je po sprawdzeniu ról. Przygotuj prywatny plik JSON z polami `email` i `password` istniejącego administratora; nie dodawaj go do repozytorium.
+
+```bash
+.venv/bin/python -m pip install playwright
+.venv/bin/python -m playwright install chromium
+.venv/bin/python scripts/verify_frontend.py --credentials-file .local/admin.json
+```
+
+Wyniki i zrzuty ekranu są zapisywane w ignorowanym katalogu `reports/frontend/`. Skrypt przyjmuje też `--url`, `--output` oraz `--browser-executable` dla istniejącego Chromium.
 
 ## Testowanie w przeglądarce — Swagger UI
 
@@ -230,7 +264,8 @@ POST BASE/api/shipments
 ```json
 {
   "order_id": "<rzeczywisty ORDER_ID>",
-  "carrier": "Kurier testowy",
+  "destination_address": "Warszawa, Testowa 1",
+  "courier_id": "22222222-2222-4222-8222-222222222222",
   "weight_kg": 1.5
 }
 ```
