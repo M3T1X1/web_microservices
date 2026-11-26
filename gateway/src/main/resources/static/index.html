@@ -44,7 +44,7 @@
             <form id="request-form" novalidate><div class="request-line"><label>Metoda<select id="request-method"><option>GET</option><option>POST</option><option>PATCH</option><option>DELETE</option><option>PUT</option></select></label><label class="grow">Ścieżka<input id="request-path" spellcheck="false" autocomplete="off" placeholder="/api/orders/{id}/pack"></label></div>
               <div id="context-fields" class="context-fields"></div>
               <label id="body-label" for="request-body">Treść żądania (JSON)</label><textarea id="request-body" spellcheck="false" rows="10" aria-labelledby="body-label"></textarea>
-              <div class="request-options"><label>Oczekiwany HTTP<select id="expected-status"><option value="">Bez porównania</option><option>200</option><option>201</option><option>401</option><option>403</option><option>404</option><option>409</option><option>422</option><option>503</option></select></label><label class="checkbox"><input id="send-auth" type="checkbox" checked> Dołącz token sesji</label><button class="button primary" id="send-request" type="submit">Wyślij żądanie</button></div>
+              <div class="request-options"><label>Oczekiwany HTTP<select id="expected-status"><option value="">Bez porównania</option><option>200</option><option>201</option><option>202</option><option>401</option><option>403</option><option>404</option><option>409</option><option>422</option><option>503</option></select></label><label class="checkbox"><input id="send-auth" type="checkbox" checked> Dołącz token sesji</label><button class="button primary" id="send-request" type="submit">Wyślij żądanie</button></div>
             </form>
           </section>
         </div>

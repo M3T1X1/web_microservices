@@ -151,13 +151,24 @@ Powiedz:
 
 Rozwiń **POST /orders/{order_id}/reserve → Try it out**. W pole **order_id** wklej id zamówienia i kliknij **Execute**.
 
-Oczekiwane: **200**, status **RESERVED**.
+Oczekiwane: **202**, status **RESERVATION_PENDING**. To zlecenie wysłane do RabbitMQ, jeszcze bez rezerwacji towaru. Ponowne kliknięcie zachowuje to samo `reservation_attempt_id`.
+
+Teraz wykonaj dwa ręczne odbiory:
+
+1. W Swaggerze Inventory: **POST /reservations/consume-events → Try it out → Execute**. Inventory odbiera zlecenie, wykonuje Allocation i publikuje wynik. Towar jest już zarezerwowany, ale Outbound nadal ma RESERVATION_PENDING.
+2. W Swaggerze Outbound: **POST /orders/consume-reservation-events → Try it out → Execute**. Następnie **GET /orders/{order_id}** — oczekiwane **RESERVED**. Dopiero teraz wolno pakować.
+
+Jeżeli zabraknie towaru, wynik zmieni status na **RESERVATION_REJECTED** i uzupełni `reservation_error`. Po uzupełnieniu towaru ponowne `/reserve` rozpoczyna nową próbę z innym ID. Błąd publikacji naprawiasz ręcznie: Outbound `/orders/{id}/sync-reservation`, Inventory `/reservations/sync-events`.
+
+Powiedz:
+
+> Outbound zleca rezerwację przez RabbitMQ. Inventory odbiera wiadomość i używa Allocation, a potem wysyła wynik. Outbound ustawia RESERVED dopiero po ręcznym odebraniu potwierdzenia. Ten sam identyfikator próby nie rezerwuje towaru drugi raz.
 
 Wróć do **GET /orders/stock-check/{stock_id}** i kliknij **Execute**.
 
 Oczekiwane: `available_quantity: 98`. Ilość fizyczna `quantity` nadal wynosi 100, a dwie sztuki są zarezerwowane.
 
-Dodatkowo możesz ponownie wykonać **POST /orders/{order_id}/reserve**, a potem stock-check. Dostępność powinna nadal wynosić **98** — ponowienie nie tworzy drugiej rezerwacji.
+Dodatkowo możesz ponownie wykonać **POST /orders/{order_id}/reserve** — odpowiedź **202** z istniejącym statusem RESERVED — a potem stock-check. Dostępność powinna nadal wynosić **98** — ponowienie nie tworzy drugiej rezerwacji.
 
 ## 9. Spakuj zamówienie i pokaż cache
 

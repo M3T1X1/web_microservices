@@ -7,7 +7,7 @@
     selected:{}, operation:null, collection:'stocks', busy:false, running:false, checks:[], status:{}};
   const labels = {inventory:'Inventory',outbound:'Outbound',shipping:'Shipping',auth:'Auth',scenarios:'Scenariusze'};
   const titles = {inventory:'Stany i przyjęcia towaru.',outbound:'Zamówienia i rezerwacje.',shipping:'Przesyłki i wydanie kurierowi.',auth:'Tożsamość i uprawnienia.',scenarios:'Sprawdź cały proces.'};
-  const subtitles = {inventory:'Przyjmij towar, sprawdź dostępność i przetestuj limity rezerwacji.',outbound:'NEW → RESERVED → PACKED → SHIPPED. Sprawdź także niedozwolone przejścia.',shipping:'NEW → READY → HANDED_OVER. Wysyłka wymaga spakowanego zamówienia.',auth:'Zaloguj się, utwórz konto lub zmień jego aktywność. Testuj dostęp różnymi rolami.',scenarios:'Poprawna ścieżka i warunki brzegowe. Rzeczywiste żądania, widoczne odpowiedzi.'};
+  const subtitles = {inventory:'Przyjmij towar i ręcznie odbierz zlecenia rezerwacji z RabbitMQ.',outbound:'Zleć rezerwację → odbierz wynik → RESERVED → PACKED → SHIPPED. Po odmowie możesz ponowić próbę.',shipping:'NEW → READY → HANDED_OVER. Wysyłka wymaga spakowanego zamówienia.',auth:'Zaloguj się, utwórz konto lub zmień jego aktywność. Testuj dostęp różnymi rolami.',scenarios:'Poprawna ścieżka i warunki brzegowe. Rzeczywiste żądania, widoczne odpowiedzi.'};
   const collectionNames = {stocks:'Stany magazynowe',receipts:'Przyjęcia',orders:'Zamówienia',shipments:'Przesyłki'};
   const collections = {inventory:['stocks','receipts'],outbound:['orders'],shipping:['shipments'],auth:[]};
   const op = (label, method, path, body=null, expected='', hint='') => ({label,method,path,body,expected,hint});
@@ -17,6 +17,8 @@
       op('Szczegóły stanu / cache','GET','/api/stocks/{stock_id}',null,200),
       op('Zmień ilość','PATCH','/api/stocks/{stock_id}',()=>({quantity:10}),200,'Mniej niż zarezerwowano → 409'),
       op('Rezerwuj stan','POST','/api/stocks/{stock_id}/reservations',()=>({order_id:state.selected.order_id||uuid(),quantity:1}),201,'Ponad dostępność → 409; ilość ≤ 0 → 422'),
+      op('Odbierz zlecenia rezerwacji','POST','/api/reservations/consume-events?limit=50',null,200,'Wykonuje Allocation i publikuje sukces albo odmowę. Potem odbierz wynik w Outbound.'),
+      op('Ponów wysłanie wyników rezerwacji','POST','/api/reservations/sync-events?limit=50',null,200,'Ręczna naprawa publikacji po awarii RabbitMQ; nie rezerwuje drugi raz.'),
       op('Lista przyjęć','GET','/api/receipts',null,200),
       op('Utwórz przyjęcie','POST','/api/receipts',()=>({supplier:'Panel testowy',items:[{sku:'UI-'+uuid().slice(0,8),quantity_received:10,target_location:'UI-TEST'}]}),201),
       op('Szczegóły przyjęcia','GET','/api/receipts/{receipt_id}',null,200),
@@ -28,7 +30,9 @@
       op('Lista zamówień','GET','/api/orders',null,200),
       op('Utwórz zamówienie','POST','/api/orders',()=>({recipient_name:'Test panelu',recipient_phone:'123456789',recipient_address:'Warszawa, Testowa 1',items:[{sku:state.selected.sku||'SKU-001',quantity:1}]}),201),
       op('Szczegóły / cache','GET','/api/orders/{order_id}',null,200),
-      op('Rezerwuj produkty','POST','/api/orders/{order_id}/reserve',null,200,'NEW → RESERVED; brak towaru → 409'),
+      op('Rezerwuj produkty','POST','/api/orders/{order_id}/reserve',null,202,'NEW / RESERVATION_REJECTED → RESERVATION_PENDING. Odbierz zlecenie w Inventory, potem wynik tutaj. Ponowienie PENDING zachowuje ID próby.'),
+      op('Ponów wysłanie zlecenia rezerwacji','POST','/api/orders/{order_id}/sync-reservation',null,200,'Po awarii RabbitMQ wyślij tę samą zapisaną próbę. Nową próbę po odmowie rozpoczyna Rezerwuj produkty.'),
+      op('Odbierz wyniki rezerwacji','POST','/api/orders/consume-reservation-events?limit=50',null,200,'Wynik Inventory zmieni status na RESERVED lub RESERVATION_REJECTED. WAREHOUSE / ADMIN.'),
       op('Spakuj zamówienie','POST','/api/orders/{order_id}/pack',null,200,'Tylko RESERVED; NEW → 409'),
       op('Sprawdź stan magazynowy','GET','/api/orders/stock-check/{stock_id}',null,200),
       op('Sprawdź gotowość wysyłki','GET','/api/orders/{order_id}/shipping-check',null,200,'Odczyt dla SHIPPING / ADMIN'),
@@ -162,7 +166,7 @@
   function columnsFor(collection) {
     if(collection==='stocks') return [['sku','SKU'],['location','Lokalizacja'],['quantity','Stan'],['reserved','Rezerwacja'],['available','Dostępne'],['id','ID']];
     if(collection==='receipts') return [['supplier','Dostawca'],['status','Status'],['items','Pozycje'],['id','ID']];
-    if(collection==='orders') return [['recipient_name','Odbiorca'],['status','Status'],['recipient_address','Adres'],['items','Pozycje'],['id','ID']];
+    if(collection==='orders') return [['recipient_name','Odbiorca'],['status','Status'],['reservation_error','Powód odmowy'],['reservation_notification_pending','Zlecenie oczekuje wysłania'],['reservation_attempt_id','ID próby'],['recipient_address','Adres'],['items','Pozycje'],['id','ID']];
     return [['status','Status'],['destination_address','Adres docelowy'],['courier_id','ID kuriera'],['weight_kg','Waga kg'],['notification_pending','Publikacja oczekuje'],['order_id','ID zamówienia'],['id','ID']];
   }
   function renderData() {
@@ -294,9 +298,17 @@
     const shipmentBody={order_id:order.id,destination_address:body.recipient_address,courier_id:uuid(),weight_kg:2.5};
     await step('Pakowanie NEW bez rezerwacji','POST',orderPath+'/pack',null,409);
     await step('Przesyłka dla niespakowanego zamówienia','POST','/api/shipments',shipmentBody,409);
-    const reserved=await step('Rezerwacja produktów','POST',orderPath+'/reserve',null,200);
+    const pending=await step('Zlecenie rezerwacji przez RabbitMQ','POST',orderPath+'/reserve',null,202);
+    check('Zamówienie oczekuje na wynik',pending.status==='RESERVATION_PENDING',pending.status);
+    const repeated=await step('Ponowienie oczekującej próby','POST',orderPath+'/reserve',null,202);
+    check('Ponowienie zachowuje ID próby',repeated.reservation_attempt_id===pending.reservation_attempt_id,repeated.reservation_attempt_id);
+    await step('Pakowanie przed potwierdzeniem rezerwacji','POST',orderPath+'/pack',null,409);
+    await step('Inventory odbiera zlecenia i wykonuje Allocation','POST','/api/reservations/consume-events?limit=500',null,200);
+    const waiting=await step('Outbound przed odbiorem wyniku','GET',orderPath,null,200);
+    check('Status nadal oczekujący',waiting.status==='RESERVATION_PENDING',waiting.status);
+    await step('Outbound odbiera wyniki rezerwacji','POST','/api/orders/consume-reservation-events?limit=500',null,200);
+    const reserved=await step('Odczyt potwierdzonego zamówienia','GET',orderPath,null,200);
     check('Zamówienie ma status RESERVED',reserved.status==='RESERVED',reserved.status);
-    await step('Ponowna rezerwacja — idempotencja','POST',orderPath+'/reserve',null,200);
     await step('Pakowanie zarezerwowanego zamówienia','POST',orderPath+'/pack',null,200);
     const shipment=await step('Utworzenie przesyłki dla PACKED','POST','/api/shipments',shipmentBody,201);remember('shipments',shipment);
     await step('Druga przesyłka dla tego samego zamówienia','POST','/api/shipments',shipmentBody,409);

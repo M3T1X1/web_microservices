@@ -120,8 +120,8 @@ def test_invalid_uuid_does_not_call_inventory(outbound):
 
 def test_separate_process_apps_only_initialize_owned_data(tmp_path):
     for domain, factory, own_routes, foreign_route, tables in [
-        ("inventory", create_inventory_app, ("/stocks", "/receipts"), "/orders", {"stocks", "receipts", "reservation_batches"}),
-        ("outbound", create_outbound_app, ("/orders",), "/stocks", {"orders", "order_dispatches", "processed_events"}),
+        ("inventory", create_inventory_app, ("/stocks", "/receipts"), "/orders", {"stocks", "receipts", "reservation_batches", "processed_events", "event_outbox"}),
+        ("outbound", create_outbound_app, ("/orders",), "/stocks", {"orders", "order_dispatches", "processed_events", "event_outbox"}),
     ]:
         discovery = FakeEureka()
         inventory_db, outbound_db = tmp_path / f"{domain}-i.db", tmp_path / f"{domain}-o.db"

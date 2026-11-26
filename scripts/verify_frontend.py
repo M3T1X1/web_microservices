@@ -20,7 +20,7 @@ def main():
     parser.add_argument('--browser-executable', help='Optional existing Chromium executable')
     parser.add_argument('--output', type=Path, default=Path('reports/frontend'))
     args = parser.parse_args()
-    credentials = json.loads(args.credentials_file.read_text())
+    credentials = json.loads(args.credentials_file.read_text(encoding='utf-8'))
     args.output.mkdir(parents=True, exist_ok=True)
     results, errors = {}, []
 
@@ -51,7 +51,7 @@ def main():
             summary = page.locator('#scenario-summary').inner_text()
             checks = page.locator('#scenario-results tr').all_text_contents()
             assert summary.startswith('PASS'), (summary, checks)
-            (args.output / 'progress.json').write_text(json.dumps({**results, name: {'summary': summary, 'checks': checks}}, ensure_ascii=False, indent=2)+'\n')
+            (args.output / 'progress.json').write_text(json.dumps({**results, name: {'summary': summary, 'checks': checks}}, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
             print(name+': '+summary, flush=True)
             return {'summary': summary, 'checks': checks}
 
@@ -77,6 +77,46 @@ def main():
         results['stock'] = scenario('stock')
         results['flow'] = scenario('flow')
         page.screenshot(path=str(args.output / 'desktop.png'))
+
+        # Reczne przyciski nowego przeplywu: odmowa, nowa proba i potwierdzenie.
+        sku = 'UI-RES-' + uuid4().hex[:8]
+        operation('inventory', 'Utwórz przyjęcie')
+        page.locator('#request-body').fill(json.dumps({'supplier': 'Test rezerwacji panelu',
+            'items': [{'sku': sku, 'quantity_received': 2, 'target_location': 'UI-TEST'}]}))
+        send(201)
+        operation('inventory', 'Zatwierdź przyjęcie')
+        send(200)
+        operation('inventory', 'Zaksięguj przyjęcie')
+        send(200)
+        page.locator('#data-content tbody tr').filter(has_text=sku).click()
+        operation('outbound', 'Utwórz zamówienie')
+        page.locator('#request-body').fill(json.dumps({'recipient_name': 'Retry test', 'recipient_phone': '1',
+            'recipient_address': 'Test', 'items': [{'sku': sku, 'quantity': 3}]}))
+        reservation_order = send(201)
+        operation('outbound', 'Rezerwuj produkty')
+        pending = send(202)
+        assert pending['status'] == 'RESERVATION_PENDING'
+        assert send(202)['reservation_attempt_id'] == pending['reservation_attempt_id']
+        operation('inventory', 'Odbierz zlecenia rezerwacji')
+        send(200)
+        operation('outbound', 'Odbierz wyniki rezerwacji')
+        send(200)
+        expect(page.locator('#data-content tbody tr').filter(has_text=reservation_order['id'])).to_contain_text('RESERVATION_REJECTED')
+        operation('inventory', 'Zmień ilość')
+        page.locator('#request-body').fill('{"quantity": 4}')
+        send(200)
+        operation('outbound', 'Rezerwuj produkty')
+        next_attempt = send(202)
+        assert next_attempt['reservation_attempt_id'] != pending['reservation_attempt_id']
+        operation('inventory', 'Odbierz zlecenia rezerwacji')
+        send(200)
+        operation('outbound', 'Odbierz wyniki rezerwacji')
+        send(200)
+        expect(page.locator('#data-content tbody tr').filter(has_text=reservation_order['id'])).to_contain_text('RESERVED')
+        results['manual_reservation_retry'] = {'summary': 'PASS: rejection, supply, new attempt, RESERVED',
+            'first_attempt': pending['reservation_attempt_id'],
+            'next_attempt': next_attempt['reservation_attempt_id'], 'status': 'RESERVED'}
+        page.screenshot(path=str(args.output / 'reservation-retry.png'))
 
         # Select a freshly created order and exercise the editable manual request.
         operation('outbound', 'Spakuj zamówienie')
@@ -106,7 +146,7 @@ def main():
             # Log sanitization includes both request credentials and validation input.
             assert account['password'] not in page.locator('#response-body').inner_text()
             accounts.append((account, created['id']))
-            (args.output / 'test-account-ids.json').write_text(json.dumps([item[1] for item in accounts]))
+            (args.output / 'test-account-ids.json').write_text(json.dumps([item[1] for item in accounts]), encoding='utf-8')
         page.locator('#logout').click()
         for account, user_id in accounts:
             login(account)
@@ -143,7 +183,7 @@ def main():
         results['browser_errors'] = errors
         browser.close()
 
-    (args.output / 'results.json').write_text(json.dumps(results, ensure_ascii=False, indent=2) + '\n')
+    (args.output / 'results.json').write_text(json.dumps(results, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     print(json.dumps({key: value.get('summary') if isinstance(value, dict) else value for key, value in results.items()}, ensure_ascii=False, indent=2))
 
 

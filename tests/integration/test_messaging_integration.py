@@ -7,14 +7,14 @@ from app.models.shipment import Shipment
 pytestmark = pytest.mark.integration
 
 
-def test_duplicate_message_updates_order_once_and_invalidates_cache(gateway_client, stock, publish_event):
+def test_duplicate_message_updates_order_once_and_invalidates_cache(gateway_client, stock, publish_event, reserve_order):
     client = gateway_client
     order_response = client.post('/api/orders', json={'recipient_name': 'RabbitMQ test', 'recipient_phone': '1',
         'recipient_address': 'Test', 'items': [{'sku': stock['sku'], 'quantity': 1}]})
     assert order_response.status_code == 201
     order = order_response.json()
     order_path = f"/api/orders/{order['id']}"
-    assert client.post(order_path + '/reserve').status_code == 200
+    reserve_order(order_path)
     assert client.post(order_path + '/pack').status_code == 200
     client.get(order_path)
     assert client.get(order_path).headers['x-cache'] == 'HIT'

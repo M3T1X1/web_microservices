@@ -11,9 +11,11 @@ from starlette.concurrency import run_in_threadpool
 
 from app.cache import JsonCache, make_redis
 from app.database import Base, make_database
-from app.db_models import OrderDispatchRow, OrderRow, ProcessedEventRow, ReceiptRow, ReservationBatchRow, ShipmentRow, StockRow
+from app.db_models import OrderDispatchRow, OrderRow, OutboxEventRow, ProcessedEventRow, ReceiptRow, ReservationBatchRow, ShipmentRow, StockRow
 from app.messaging import BrokerUnavailableError, RabbitEventBroker
-from app.models.events import OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY
+from app.models.events import (OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY, INVENTORY_RESERVATION_QUEUE,
+                              RESERVATION_REQUEST_KEY, OUTBOUND_RESERVATION_QUEUE,
+                              RESERVATION_RESERVED_KEY, RESERVATION_REJECTED_KEY)
 from app.discovery import create_eureka_client
 from app.documentation import documentation_settings
 from app.repositories import OrderRepository, ReceiptRepository, StockRepository
@@ -22,6 +24,7 @@ from app.security import TokenVerifier, require_roles
 from app.services.allocation import AllocationService
 from app.services.orders import OrderService
 from app.services.receipts import ReceiptService
+from app.services.reservation_events import ReservationEventService
 from app.services.shipping import ShippingService
 from app.services.stocks import StockService
 
@@ -57,7 +60,8 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
                 engine, sessions = make_database(
                     database_url or os.getenv("DATABASE_URL", "sqlite:///./inventory.db"))
                 resources.callback(engine.dispose)
-                Base.metadata.create_all(engine, tables=[StockRow.__table__, ReceiptRow.__table__, ReservationBatchRow.__table__])
+                Base.metadata.create_all(engine, tables=[StockRow.__table__, ReceiptRow.__table__, ReservationBatchRow.__table__,
+                                                        ProcessedEventRow.__table__, OutboxEventRow.__table__])
                 app.state.engine = engine
                 app.state.databases["inventory"] = engine
                 app.state.stock_repository = StockRepository(sessions)
@@ -66,12 +70,17 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
                 app.state.stock_service = StockService(app.state.stock_repository, app.state.stock_cache)
                 app.state.receipt_service = ReceiptService(app.state.receipt_repository, app.state.stock_cache)
                 app.state.allocation_service = AllocationService(sessions, app.state.stock_cache)
+                app.state.reservation_event_service = ReservationEventService(app.state.allocation_service, app.state.stock_cache, broker)
                 app.state.stock_repository.seed()
+                try:
+                    await run_in_threadpool(broker.bind_queue, INVENTORY_RESERVATION_QUEUE, RESERVATION_REQUEST_KEY)
+                except BrokerUnavailableError:
+                    logging.getLogger(__name__).warning("RabbitMQ unavailable; Inventory HTTP remains available")
             if outbound_enabled:
                 engine, sessions = make_database(
                     outbound_database_url or os.getenv("OUTBOUND_DATABASE_URL", "sqlite:///./outbound.db"))
                 resources.callback(engine.dispose)
-                Base.metadata.create_all(engine, tables=[OrderRow.__table__, OrderDispatchRow.__table__, ProcessedEventRow.__table__])
+                Base.metadata.create_all(engine, tables=[OrderRow.__table__, OrderDispatchRow.__table__, ProcessedEventRow.__table__, OutboxEventRow.__table__])
                 app.state.outbound_engine = engine
                 app.state.databases["outbound"] = engine
                 app.state.order_repository = OrderRepository(sessions)
@@ -79,6 +88,8 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
                 app.state.order_service = OrderService(app.state.order_repository, app.state.order_cache, broker)
                 try:
                     await run_in_threadpool(broker.bind_queue, OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY)
+                    for key in (RESERVATION_RESERVED_KEY, RESERVATION_REJECTED_KEY):
+                        await run_in_threadpool(broker.bind_queue, OUTBOUND_RESERVATION_QUEUE, key)
                 except BrokerUnavailableError:
                     logging.getLogger(__name__).warning("RabbitMQ unavailable; Outbound HTTP remains available")
             if domain == "shipping":
@@ -108,7 +119,7 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
         app.include_router(health.router)
     if inventory_enabled:
         app.include_router(stocks.router, dependencies=[Depends(require_roles("WAREHOUSE"))])
-        app.include_router(allocations.router, include_in_schema=False)
+        app.include_router(allocations.router)
         app.include_router(receipts.router, dependencies=[Depends(require_roles("WAREHOUSE"))])
     if outbound_enabled:
         app.include_router(orders.router)

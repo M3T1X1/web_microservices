@@ -13,3 +13,5 @@ gateway/target/
 eureka-server/target/
 .local/
 reports/
+.postman/
+postman/

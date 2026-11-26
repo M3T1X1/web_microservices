@@ -7,11 +7,11 @@ Projekt składa się z czterech mikrousług. Każda działa w osobnym kontenerze
 | Mikrousługa | Odpowiedzialność | API przez Gateway | Własna baza |
 |---|---|---|---|
 | **Inventory** | Stany i lokalizacje towarów, przyjęcia dostaw oraz rezerwacje ilości dla zamówień. Przyjęcia są częścią Inventory, nie osobną mikrousługą. | `/api/stocks`, `/api/receipts` | `inventory.db` |
-| **Outbound** | Tworzenie i odczyt zamówień, rezerwowanie towaru przez API Inventory, pakowanie oraz zmiana zamówienia na SHIPPED po odebraniu zdarzenia wysyłki. Przechowuje również informacje do deduplikacji zdarzeń. | `/api/orders` | `outbound.db` |
+| **Outbound** | Tworzenie i odczyt zamówień, zlecanie rezerwacji przez RabbitMQ, pakowanie oraz zmiana zamówienia na SHIPPED po odebraniu zdarzenia wysyłki. Przechowuje również informacje do deduplikacji zdarzeń. | `/api/orders` | `outbound.db` |
 | **Shipping** | Tworzenie przesyłek dla spakowanych zamówień, przygotowanie do wysyłki i wydanie kurierowi. Sprawdza zamówienie przez API Outbound i publikuje zdarzenie `ShipmentHandedOver` do RabbitMQ. | `/api/shipments` | `shipping.db` |
 | **Auth** | Konta użytkowników, hashowanie haseł, logowanie, wydawanie tokenów JWT oraz zarządzanie rolami ADMIN, WAREHOUSE i SHIPPING. Pozostałe mikrousługi samodzielnie sprawdzają JWT i wymagane role. | `/api/auth` | `auth.db` |
 
-Usługi komunikują się przez HTTP i zdarzenia, bez bezpośredniego dostępu do cudzych baz. Główne zależności to **Outbound → Inventory** przy rezerwacji, **Shipping → Outbound** przy sprawdzaniu zamówienia oraz **Shipping → RabbitMQ → Outbound** przy potwierdzaniu wysyłki.
+Usługi komunikują się przez HTTP i zdarzenia, bez bezpośredniego dostępu do cudzych baz. Rezerwacja to **Outbound → RabbitMQ → Inventory → RabbitMQ → Outbound**, z dwoma ręcznymi odbiorami. HTTP pozostaje dla stock-check oraz **Shipping → Outbound** przy sprawdzaniu zamówienia. Wydanie przesyłki to **Shipping → RabbitMQ → Outbound**.
 
 Dodatkowo działają komponenty infrastruktury: **Gateway** udostępnia wspólne wejście HTTP na `127.0.0.1:8080`, **Eureka** przechowuje rejestr adresów usług, **Redis** zapewnia cache, a **RabbitMQ** przekazuje zdarzenia. `init-keys` jest jednorazowym zadaniem przygotowującym klucze JWT.
 
@@ -132,10 +132,13 @@ flowchart LR
     G -->|/api/stocks i /api/receipts| I[Inventory]
     G -->|/api/orders| O[Outbound]
     G -->|/api/shipments| S[Shipping]
-    O -->|HTTP: odczyt i rezerwacja, JWT| I
+    O -->|HTTP: stock-check, JWT| I
     S -->|HTTP: sprawdzenie PACKED, JWT| O
     S -->|publikacja ShipmentHandedOver| Q[RabbitMQ]
     Q -->|ręczne consume-events i ACK| O
+    O -->|OrderReservationRequested| Q
+    Q -->|ręczny odbiór zleceń| I
+    I -->|OrderStockReserved / OrderStockReservationRejected| Q
     I --> R[Redis]
     O --> R
     E[Eureka] -. adresy instancji .-> G
@@ -248,12 +251,15 @@ Oczekiwane: `201`, `NEW`. Zapisz `id` jako `ORDER_ID`.
 | Żądanie | Oczekiwany wynik i komunikacja |
 |---|---|
 | `POST /api/orders/ORDER_ID/pack` przed rezerwacją | `409`, nie można pakować NEW |
-| `POST /api/orders/ORDER_ID/reserve` | `200`, `RESERVED`; Outbound rezerwuje pozycje w Inventory przez HTTP |
+| `POST /api/orders/ORDER_ID/reserve` | `202`, `RESERVATION_PENDING`; zlecenie trafia do RabbitMQ |
+| `POST /api/reservations/consume-events` | `200`; Inventory wykonuje Allocation i publikuje wynik |
+| `GET /api/orders/ORDER_ID` przed odbiorem wyniku | Nadal `RESERVATION_PENDING`; pakowanie daje 409 |
+| `POST /api/orders/consume-reservation-events` | `200`; wynik zmienia status na `RESERVED` albo `RESERVATION_REJECTED` |
 | `GET /api/orders/stock-check/STOCK_ID` | `200`, `available_quantity: 8` |
 | `POST /api/orders/ORDER_ID/pack` | `200`, `PACKED`; zapis lokalny w Outbound |
 | Dwa razy `GET /api/orders/ORDER_ID` | `200`, `PACKED`, cache `MISS → HIT` |
 
-Rezerwacja nie zmniejsza pola `quantity`: nadal wynosi ono 10. Dostępność wynosi 8, ponieważ osobno zapisano rezerwację 2 sztuk. Powtórzenie `/reserve` już zarezerwowanego zamówienia nie powinno tworzyć drugiej rezerwacji.
+Rezerwacja nie zmniejsza pola `quantity`: nadal wynosi ono 10. Dostępność wynosi 8 po odebraniu zlecenia przez Inventory. Odbiory są ręczne; panel ma przyciski „Odbierz zlecenia rezerwacji” w Inventory i „Odbierz wyniki rezerwacji” w Outbound. Powtórzenie PENDING zachowuje ID próby, a RESERVED nie tworzy drugiej rezerwacji. Po odmowie `/reserve` tworzy nową próbę; powód jest w `reservation_error`. Po awarii brokera użyj Outbound `/orders/{id}/sync-reservation` albo Inventory `/reservations/sync-events`. Odbiór wyników wymaga WAREHOUSE/ADMIN, dotychczasowy odbiór wysyłki nadal SHIPPING/ADMIN.
 
 ### 4.6. Przesyłka — Shipping → Outbound
 
@@ -380,7 +386,7 @@ docker compose stop inventory
 | `GET /api/stocks/STOCK_ID` | Błąd Gateway: 500 lub 503 |
 | `GET /api/receipts/RECEIPT_ID` | Błąd Gateway: ta sama niedostępna usługa |
 | `GET /api/orders/ORDER_NEW_ID` | `200`: Outbound czyta własną bazę/cache |
-| `POST /api/orders/ORDER_NEW_ID/reserve` | `503`: nie można zarezerwować w Inventory |
+| `POST /api/orders/ORDER_NEW_ID/reserve` | `202`, RESERVATION_PENDING: zlecenie czeka w RabbitMQ na powrót Inventory |
 | `GET /api/orders/stock-check/STOCK_ID` | `503`: niedostępne Inventory |
 | `GET /api/auth/me` | `200` |
 | `GET /api/shipments/SHIPMENT_READY_ID` | `200`: Shipping odczytuje własną bazę |
@@ -392,7 +398,7 @@ docker compose start inventory
 docker compose ps
 ```
 
-Po przywróceniu ponów GET stanu i `stock-check`. W razie opóźnienia rejestru odczekaj i ponów żądanie.
+Po przywróceniu ponów GET stanu i `stock-check`. Odbierz zlecenie przez Inventory `/reservations/consume-events`, potem wynik przez Outbound `/orders/consume-reservation-events`. W razie opóźnienia rejestru odczekaj i ponów żądanie.
 
 ## 8. Awaria Outbound
 
@@ -522,6 +528,8 @@ Po osiągnięciu `healthy`:
 
 Po awarii publikacji używaj **`/sync`**, a nie ponownego `/hand-over`: przesyłka została już wydana, więc ponowne wydanie zwróci 409. Ponowienia `/sync` wymagają ręcznego wywołania; nie działa tu automatyczny proces naprawy w tle.
 
+Przy rezerwacji awaria publikacji daje 503, ale zamówienie zostaje RESERVATION_PENDING z `reservation_notification_pending=true`. Po powrocie brokera wywołaj `/orders/{id}/sync-reservation`, odbiór zleceń Inventory i odbiór wyników Outbound. Jeśli Inventory zapisało wynik, lecz nie mogło go wysłać, użyj `/reservations/sync-events`. Każde ponowienie zachowuje tę samą próbę i nie rezerwuje ponownie.
+
 ## 13. Awaria Eureki
 
 Najpierw wykonaj poprawny odczyt stanu, zamówienia i `stock-check`, aby klienci mieli pobrany rejestr.
@@ -578,7 +586,7 @@ Po powrocie ponów `/health` i odczyty biznesowe.
 
 | Niedostępny komponent | Co przestaje działać | Co pozostaje dostępne przy ważnym JWT |
 |---|---|---|
-| Inventory | Stany, przyjęcia, nowe rezerwacje i stock-check | Lokalne operacje Outbound, odczyty Shipping, Auth |
+| Inventory | Stany, przyjęcia, wykonanie rezerwacji i stock-check | Zlecenie rezerwacji czekające w RabbitMQ, lokalne operacje Outbound, odczyty Shipping, Auth |
 | Outbound | Zamówienia, odbiór zdarzeń, sprawdzanie zamówienia przy operacjach Shipping | Inventory, Auth, lokalne odczyty Shipping |
 | Shipping | API przesyłek i publikacja nowych wydań | Inventory, Outbound, Auth; odbiór już opublikowanych zdarzeń |
 | Auth | Logowanie, zarządzanie kontami, `/auth/me` | Operacje innych usług do wygaśnięcia JWT |
@@ -652,7 +660,7 @@ docker compose down
 
 ## 19. Zaobserwowane wyniki prób awarii
 
-Próby wykonano 24.11.2026 na uruchomionym środowisku Compose. Każdy komponent zatrzymywano osobno, sprawdzano odpowiedzi i przywracano przed kolejną próbą. Wyniki krótkiej próby zależą od momentu odświeżenia rejestru; nie zastępują długotrwałych testów dostępności.
+Próby wykonano 24.11.2026 na uruchomionym środowisku Compose, przed zmianą rezerwacji na RabbitMQ. Wiersz Inventory opisuje historyczną rezerwację HTTP; aktualne oczekiwania są w sekcji 7. Każdy komponent zatrzymywano osobno, sprawdzano odpowiedzi i przywracano przed kolejną próbą. Wyniki krótkiej próby zależą od momentu odświeżenia rejestru; nie zastępują długotrwałych testów dostępności.
 
 | Zatrzymany komponent | Rzeczywisty wynik |
 |---|---|

@@ -225,8 +225,8 @@ def test_concurrent_reservations_across_app_instances(app_factory):
 
 
 def test_database_ownership(client):
-    assert inspect(client.app.state.engine).get_table_names() == ["receipts", "reservation_batches", "stocks"]
-    assert inspect(client.app.state.outbound_engine).get_table_names() == ["order_dispatches", "orders", "processed_events"]
+    assert inspect(client.app.state.engine).get_table_names() == ["event_outbox", "processed_events", "receipts", "reservation_batches", "stocks"]
+    assert inspect(client.app.state.outbound_engine).get_table_names() == ["event_outbox", "order_dispatches", "orders", "processed_events"]
     with client.app.state.engine.connect() as connection:
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
 
