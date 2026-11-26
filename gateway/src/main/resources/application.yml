@@ -48,7 +48,7 @@ spring:
             - id: inventory-reservation-events
               uri: lb://INVENTORY-SERVICE
               predicates:
-                - Path=/api/reservations/consume-events,/api/reservations/sync-events
+                - Path=/api/reservations/consume-events,/api/reservations/sync-events,/api/reservations/consume-shipment-events
               filters:
                 - StripPrefix=1
             - id: outbound-orders

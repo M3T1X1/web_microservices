@@ -7,7 +7,7 @@
     selected:{}, operation:null, collection:'stocks', busy:false, running:false, checks:[], status:{}};
   const labels = {inventory:'Inventory',outbound:'Outbound',shipping:'Shipping',auth:'Auth',scenarios:'Scenariusze'};
   const titles = {inventory:'Stany i przyjęcia towaru.',outbound:'Zamówienia i rezerwacje.',shipping:'Przesyłki i wydanie kurierowi.',auth:'Tożsamość i uprawnienia.',scenarios:'Sprawdź cały proces.'};
-  const subtitles = {inventory:'Przyjmij towar i ręcznie odbierz zlecenia rezerwacji z RabbitMQ.',outbound:'Zleć rezerwację → odbierz wynik → RESERVED → PACKED → SHIPPED. Po odmowie możesz ponowić próbę.',shipping:'NEW → READY → HANDED_OVER. Wysyłka wymaga spakowanego zamówienia.',auth:'Zaloguj się, utwórz konto lub zmień jego aktywność. Testuj dostęp różnymi rolami.',scenarios:'Poprawna ścieżka i warunki brzegowe. Rzeczywiste żądania, widoczne odpowiedzi.'};
+  const subtitles = {inventory:'Przyjmij towar, odbierz rezerwacje, a po wydaniu przesyłki ręcznie rozlicz towar.',outbound:'Zleć rezerwację → odbierz wynik → RESERVED → PACKED → SHIPPED. Po odmowie możesz ponowić próbę.',shipping:'NEW → READY → HANDED_OVER. Wysyłka wymaga spakowanego zamówienia.',auth:'Zaloguj się, utwórz konto lub zmień jego aktywność. Testuj dostęp różnymi rolami.',scenarios:'Poprawna ścieżka i warunki brzegowe. Rzeczywiste żądania, widoczne odpowiedzi.'};
   const collectionNames = {stocks:'Stany magazynowe',receipts:'Przyjęcia',orders:'Zamówienia',shipments:'Przesyłki'};
   const collections = {inventory:['stocks','receipts'],outbound:['orders'],shipping:['shipments'],auth:[]};
   const op = (label, method, path, body=null, expected='', hint='') => ({label,method,path,body,expected,hint});
@@ -19,6 +19,7 @@
       op('Rezerwuj stan','POST','/api/stocks/{stock_id}/reservations',()=>({order_id:state.selected.order_id||uuid(),quantity:1}),201,'Ponad dostępność → 409; ilość ≤ 0 → 422'),
       op('Odbierz zlecenia rezerwacji','POST','/api/reservations/consume-events?limit=50',null,200,'Wykonuje Allocation i publikuje sukces albo odmowę. Potem odbierz wynik w Outbound.'),
       op('Ponów wysłanie wyników rezerwacji','POST','/api/reservations/sync-events?limit=50',null,200,'Ręczna naprawa publikacji po awarii RabbitMQ; nie rezerwuje drugi raz.'),
+      op('Odbierz wydania przesyłek','POST','/api/reservations/consume-shipment-events?limit=50',null,200,'Odejmuje wydane sztuki i usuwa ich aktywne rezerwacje. Osobna kolejka; Outbound odbiera swoją kopię zdarzenia.'),
       op('Lista przyjęć','GET','/api/receipts',null,200),
       op('Utwórz przyjęcie','POST','/api/receipts',()=>({supplier:'Panel testowy',items:[{sku:'UI-'+uuid().slice(0,8),quantity_received:10,target_location:'UI-TEST'}]}),201),
       op('Szczegóły przyjęcia','GET','/api/receipts/{receipt_id}',null,200),
@@ -36,7 +37,7 @@
       op('Spakuj zamówienie','POST','/api/orders/{order_id}/pack',null,200,'Tylko RESERVED; NEW → 409'),
       op('Sprawdź stan magazynowy','GET','/api/orders/stock-check/{stock_id}',null,200),
       op('Sprawdź gotowość wysyłki','GET','/api/orders/{order_id}/shipping-check',null,200,'Odczyt dla SHIPPING / ADMIN'),
-      op('Odbierz zdarzenia RabbitMQ','POST','/api/orders/consume-events?limit=50',null,200,'Aktualizuje zamówienia po wydaniu przesyłek'),
+      op('Odbierz potwierdzenia wydania przesyłek','POST','/api/orders/consume-events?limit=50',null,200,'Ustawia SHIPPED. Stan towaru rozliczysz osobno w Inventory: Odbierz wydania przesyłek.'),
       op('Potwierdź wysyłkę ręcznie','POST','/api/orders/{order_id}/dispatch',()=>({shipment_id:state.selected.shipment_id||uuid()}),200,'SHIPPING / ADMIN; zamówienie musi być PACKED')
     ],
     shipping:[
@@ -323,6 +324,11 @@
     check('Odebrano co najmniej jedno zdarzenie',consumed.consumed_messages>=1,String(consumed.consumed_messages));
     const after=await step('Odczyt zamówienia po zdarzeniu','GET',orderPath,null,200);
     check('Po odbiorze zamówienie SHIPPED',after.status==='SHIPPED',after.status);
+    const beforeSettlement=await step('Stan przed odbiorem wydania w Inventory','GET','/api/stocks/'+stock.id,null,200);
+    check('Przed rozliczeniem fizyczna ilość nadal 10',beforeSettlement.quantity===10,String(beforeSettlement.quantity));
+    await step('Inventory rozlicza wydane sztuki','POST','/api/reservations/consume-shipment-events?limit=500',null,200);
+    const settled=await step('Stan po rozliczeniu wydania','GET','/api/stocks/'+stock.id,null,200);
+    check('Odjęto 2 sztuki i usunięto rezerwację',settled.quantity===8 && !settled.reservations.some(item=>item.order_id===order.id),json(settled));
     await step('Ponowne wydanie HANDED_OVER','POST',shipmentPath+'/hand-over',null,409);
     await step('Anulowanie wydanej przesyłki','POST',shipmentPath+'/cancel',null,409);
     await step('Synchronizacja już opublikowanego zdarzenia','POST',shipmentPath+'/sync',null,200);

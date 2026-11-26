@@ -254,6 +254,15 @@ Wróć do Swaggera **Outbound**:
 4. Wykonaj **GET /orders/{order_id}** — teraz ma **SHIPPED**, a pierwszy odczyt po odbiorze ma `x-cache: MISS`.
 5. Ponownie wykonaj **POST /orders/consume-events** — jeśli nie ma innych wiadomości, obie wartości wynoszą 0.
 
+W Swaggerze **Inventory**:
+
+1. Wykonaj **GET /stocks/{stock_id}** — nadal `quantity: 100` i rezerwacja 2 sztuk.
+2. Wykonaj **POST /reservations/consume-shipment-events → Try it out → Execute**.
+3. Ponów **GET /stocks/{stock_id}** — teraz `quantity: 98`, rezerwacja tego zamówienia zniknęła, dostępność nadal wynosi 98.
+4. Ponowny odbiór pustej kolejki zwraca zera. Wpis `reservation_batches` zostaje w bazie ze statusem CONSUMED.
+
+W panelu odpowiada temu **Inventory → Odbierz wydania przesyłek**. Outbound ma osobny przycisk **Odbierz potwierdzenia wydania przesyłek**. Kolejność tych dwóch odbiorów jest dowolna.
+
 Powiedz:
 
-> Shipping opublikował zdarzenie, a Outbound odebrał je przez RabbitMQ i zmienił własne zamówienie na SHIPPED. Odbiór uruchamiamy ręcznie. Deduplikacja zdarzeń jest zapisywana w bazie.
+> Shipping publikuje jedno zdarzenie do dwóch kolejek. Outbound ustawia SHIPPED, a Inventory odejmuje wydane sztuki i rozlicza rezerwację. Oba odbiory uruchamiamy ręcznie. Duplikat nie zmienia zamówienia ani ilości drugi raz.

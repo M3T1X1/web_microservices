@@ -401,6 +401,7 @@ def test_reservation_consumers_require_warehouse_role(world):
     clients, tokens, _, _ = world
     for client, path in ((clients['inventory'], '/reservations/consume-events'),
                          (clients['inventory'], '/reservations/sync-events'),
+                         (clients['inventory'], '/reservations/consume-shipment-events'),
                          (clients['outbound'], '/orders/consume-reservation-events')):
         assert client.post(path).status_code == 401
         assert client.post(path, headers=tokens['SHIPPING']).status_code == 403

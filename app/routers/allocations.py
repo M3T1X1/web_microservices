@@ -18,3 +18,8 @@ def consume_events(request: Request, limit: int = Query(default=50, ge=1, le=500
 @router.post("/sync-events", summary="Ponow publikacje oczekujacych wynikow rezerwacji")
 def sync_events(request: Request, limit: int = Query(default=50, ge=1, le=500)):
     return request.app.state.reservation_event_service.sync(limit)
+
+
+@router.post("/consume-shipment-events", summary="Odbierz wydania przesylek i rozlicz stan magazynowy")
+def consume_shipment_events(request: Request, limit: int = Query(default=50, ge=1, le=500)):
+    return request.app.state.inventory_shipping_service.consume(limit)

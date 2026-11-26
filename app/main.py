@@ -13,7 +13,7 @@ from app.cache import JsonCache, make_redis
 from app.database import Base, make_database
 from app.db_models import OrderDispatchRow, OrderRow, OutboxEventRow, ProcessedEventRow, ReceiptRow, ReservationBatchRow, ShipmentRow, StockRow
 from app.messaging import BrokerUnavailableError, RabbitEventBroker
-from app.models.events import (OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY, INVENTORY_RESERVATION_QUEUE,
+from app.models.events import (OUTBOUND_SHIPMENT_QUEUE, INVENTORY_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY, INVENTORY_RESERVATION_QUEUE,
                               RESERVATION_REQUEST_KEY, OUTBOUND_RESERVATION_QUEUE,
                               RESERVATION_RESERVED_KEY, RESERVATION_REJECTED_KEY)
 from app.discovery import create_eureka_client
@@ -25,6 +25,7 @@ from app.services.allocation import AllocationService
 from app.services.orders import OrderService
 from app.services.receipts import ReceiptService
 from app.services.reservation_events import ReservationEventService
+from app.services.inventory_shipping import InventoryShippingService
 from app.services.shipping import ShippingService
 from app.services.stocks import StockService
 
@@ -71,9 +72,11 @@ def create_app(database_url=None, redis_client=None, *, outbound_database_url=No
                 app.state.receipt_service = ReceiptService(app.state.receipt_repository, app.state.stock_cache)
                 app.state.allocation_service = AllocationService(sessions, app.state.stock_cache)
                 app.state.reservation_event_service = ReservationEventService(app.state.allocation_service, app.state.stock_cache, broker)
+                app.state.inventory_shipping_service = InventoryShippingService(app.state.allocation_service, app.state.stock_cache, broker)
                 app.state.stock_repository.seed()
                 try:
                     await run_in_threadpool(broker.bind_queue, INVENTORY_RESERVATION_QUEUE, RESERVATION_REQUEST_KEY)
+                    await run_in_threadpool(broker.bind_queue, INVENTORY_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY)
                 except BrokerUnavailableError:
                     logging.getLogger(__name__).warning("RabbitMQ unavailable; Inventory HTTP remains available")
             if outbound_enabled:

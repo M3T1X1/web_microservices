@@ -1,4 +1,6 @@
 """Atomowe, ponawialne rezerwowanie wszystkich pozycji jednego zamówienia."""
+from uuid import UUID
+
 from fastapi import HTTPException
 from sqlalchemy import select
 from app.db_models import ReservationBatchRow, StockRow
@@ -23,6 +25,8 @@ class AllocationService:
         changed = []
         previous = db.get(ReservationBatchRow, body.order_id)
         if previous:
+            if previous.status == "CONSUMED":
+                raise HTTPException(409, "Order reservation has already been consumed")
             if previous.items != normalized:
                 raise HTTPException(409, "Order reservation payload differs from the original")
             # Przy ponowieniu nadal usuwamy cache rekordow dotknietych rezerwacja.
@@ -44,3 +48,39 @@ class AllocationService:
                 raise HTTPException(409, "Insufficient available stock")
         db.add(ReservationBatchRow(order_id=body.order_id, items=normalized))
         return changed
+
+    def consume_in_transaction(self, db, event):
+        """Rozchod tylko z zapisanych rezerwacji; wywolujacy zapisuje tez deduplikacje."""
+        batch = db.get(ReservationBatchRow, event.order_id)
+        if batch is None:
+            raise HTTPException(409, "Order has no complete reservation to consume")
+        if batch.status == "CONSUMED":
+            if batch.shipment_id != event.shipment_id:
+                raise HTTPException(409, "Order reservation was consumed by another shipment")
+            return [UUID(value) for value in batch.consumed_stock_ids]
+        if db.scalar(select(ReservationBatchRow.order_id).where(
+                ReservationBatchRow.shipment_id == event.shipment_id)) is not None:
+            raise HTTPException(409, "Shipment already consumed another order reservation")
+
+        plan, totals = [], {}
+        for row in db.scalars(select(StockRow).order_by(StockRow.id).with_for_update()):
+            own = [item for item in row.reservations if item["order_id"] == str(event.order_id)]
+            if not own:
+                continue
+            quantity = sum(item["quantity"] for item in own)
+            if quantity <= 0 or row.quantity < sum(item["quantity"] for item in row.reservations):
+                raise HTTPException(409, "Stock does not cover its reservations")
+            totals[row.sku] = totals.get(row.sku, 0) + quantity
+            plan.append((row, quantity))
+        actual = [{"sku": sku, "quantity": quantity} for sku, quantity in sorted(totals.items())]
+        if actual != normalized_items(batch.items):
+            raise HTTPException(409, "Active reservations do not match the complete order reservation")
+
+        # Najpierw sprawdzamy calosc; potem usuwamy tylko rezerwacje tego zamowienia.
+        for row, quantity in plan:
+            row.quantity -= quantity
+            row.reservations = [item for item in row.reservations if item["order_id"] != str(event.order_id)]
+        batch.status = "CONSUMED"
+        batch.shipment_id = event.shipment_id
+        batch.consumed_stock_ids = [str(row.id) for row, _ in plan]
+        return [row.id for row, _ in plan]

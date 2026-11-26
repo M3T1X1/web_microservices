@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.db_models import OrderDispatchRow, OrderRow, OutboxEventRow, ProcessedEventRow, ReceiptRow, StockRow
+from app.db_models import OrderDispatchRow, OrderRow, OutboxEventRow, ProcessedEventRow, ReceiptRow, ReservationBatchRow, StockRow
 from app.models.events import OrderReservationRequested, OrderStockReserved, RESERVATION_REQUEST_KEY, reservation_request_id
 from app.models.order import Order, OrderCreate, normalized_items
 from app.models.receipt import Receipt, ReceiptCreate
@@ -65,6 +65,9 @@ class StockRepository:
     def reserve(self, stock_id: UUID, reservation: Reservation) -> Reservation:
         with write_transaction(self.sessions) as db:
             row = self._find(db, stock_id, lock=True)
+            batch = db.get(ReservationBatchRow, reservation.order_id)
+            if batch is not None and batch.status == "CONSUMED":
+                raise HTTPException(409, "Order reservation has already been consumed")
             reserved = sum(item["quantity"] for item in row.reservations)
             if reservation.quantity > row.quantity - reserved:
                 raise HTTPException(409, "Insufficient available stock")

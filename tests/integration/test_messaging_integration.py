@@ -34,3 +34,15 @@ def test_duplicate_message_updates_order_once_and_invalidates_cache(gateway_clie
     assert read.json()['status'] == 'SHIPPED' and read.headers['x-cache'] == 'MISS'
     assert read.headers['x-gateway'] == 'lab4'
     assert client.get(order_path).headers['x-cache'] == 'HIT'
+    stock_path = '/api/stocks/' + stock['id']
+    before = client.get(stock_path)
+    assert before.json()['quantity'] == 10
+    assert before.json()['reservations'] == [{'order_id': order['id'], 'quantity': 1}]
+    assert client.get(stock_path).headers['x-cache'] == 'HIT'
+    consumed = client.post('/api/reservations/consume-shipment-events')
+    assert consumed.status_code == 200, consumed.text
+    assert consumed.json() == {'consumed_messages': 2, 'unique_events_processed': 1}
+    after = client.get(stock_path)
+    assert after.headers['x-cache'] == 'MISS'
+    assert after.json()['quantity'] == 9 and after.json()['reservations'] == []
+    assert client.post('/api/reservations/consume-shipment-events').json()['consumed_messages'] == 0

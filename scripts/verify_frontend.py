@@ -78,6 +78,12 @@ def main():
         results['flow'] = scenario('flow')
         page.screenshot(path=str(args.output / 'desktop.png'))
 
+        # Osobny reczny przycisk Inventory jest dostepny niezaleznie od odbioru Outbound.
+        operation('inventory', 'Odbierz wydania przesyłek')
+        empty = send(200)
+        assert empty == {'consumed_messages': 0, 'unique_events_processed': 0}, empty
+        results['manual_inventory_settlement'] = 'PASS: button available; flow settled stock and queue is empty'
+
         # Reczne przyciski nowego przeplywu: odmowa, nowa proba i potwierdzenie.
         sku = 'UI-RES-' + uuid4().hex[:8]
         operation('inventory', 'Utwórz przyjęcie')

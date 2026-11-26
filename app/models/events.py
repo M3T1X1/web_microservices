@@ -9,6 +9,7 @@ from app.models.stock import NonEmptyText
 
 SHIPMENT_ROUTING_KEY = "shipment.handed_over"
 OUTBOUND_SHIPMENT_QUEUE = "outbound.shipment-events"
+INVENTORY_SHIPMENT_QUEUE = "inventory.shipment-events"
 RESERVATION_REQUEST_KEY = "order.reservation.requested"
 RESERVATION_RESERVED_KEY = "order.stock.reserved"
 RESERVATION_REJECTED_KEY = "order.stock.reservation_rejected"

@@ -284,7 +284,7 @@ Oczekiwane: `201`, `NEW`. Shipping wywołuje Outbound przez HTTP i sprawdza, czy
 | `POST /api/shipments/SHIPMENT_ID/ready` | `200`, `READY`; ponowne sprawdzenie zamówienia w Outbound |
 | `POST /api/shipments/SHIPMENT_ID/hand-over` | `200`, `HANDED_OVER`, ustawione `handed_over_at`, `notification_pending: false` |
 
-### 4.7. Asynchroniczny etap Shipping → RabbitMQ → Outbound
+### 4.7. Asynchroniczny etap Shipping → RabbitMQ → Outbound i Inventory
 
 Natychmiast po `/hand-over`:
 
@@ -300,7 +300,7 @@ Sprawdź kolejkę:
 docker compose exec rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
 ```
 
-W izolowanym teście `outbound.shipment-events` powinno mieć jedną gotową wiadomość. Jeśli są wiadomości z wcześniejszych testów, liczba może być większa.
+W izolowanym teście `outbound.shipment-events` i `inventory.shipment-events` powinny mieć po jednej gotowej wiadomości. Jeśli są wiadomości z wcześniejszych testów, liczba może być większa. Każda usługa odbiera własną kopię.
 
 ```http
 POST BASE/api/orders/consume-events
@@ -312,9 +312,19 @@ Oczekiwane w izolowanym teście:
 {"consumed_messages": 1, "unique_events_processed": 1}
 ```
 
-Teraz GET zamówienia zwraca `SHIPPED` i `X-Cache: MISS`; kolejny odczyt daje `HIT`. Kolejka jest pusta. Powtórny `/consume-events` bez nowych zdarzeń zwraca zera. Powtórny `/hand-over` zwraca `409`.
+Teraz GET zamówienia zwraca `SHIPPED` i `X-Cache: MISS`; kolejny odczyt daje `HIT`. Kolejka Outbound jest pusta, ale Inventory nadal ma swoją wiadomość: ilość fizyczna wynosi 10, a rezerwacja 2 jest aktywna.
+
+W Inventory jako WAREHOUSE/ADMIN wykonaj ręcznie:
+
+```http
+POST BASE/api/reservations/consume-shipment-events
+```
+
+Panel ma przycisk **Inventory → Odbierz wydania przesyłek**. Po odbiorze GET stanu pokazuje `quantity: 8` i brak rezerwacji tego zamówienia. Dostępność nadal wynosi 8. W bazie `reservation_batches` zachowuje wpis ze statusem CONSUMED. Odbiory Inventory i Outbound można wykonać w dowolnej kolejności. Powtórny odbiór pustej kolejki zwraca zera, duplikat nie odejmuje ponownie. Powtórny `/hand-over` zwraca `409`.
 
 Pusty ponowny odbiór potwierdza opróżnienie kolejki, ale sam nie dowodzi deduplikacji. Deduplikację osobno sprawdzają testy integracyjne przez ponowne wysłanie tego samego `event_id`; oczekiwane wtedy: jedna odebrana wiadomość, zero unikalnych przetworzeń.
+
+Przy aktualizacji istniejącego Inventory najpierw wykonaj `scripts/migrate_inventory_shipments.py` według README. Nowa kolejka nie odtwarza zdarzeń opublikowanych przed jej utworzeniem. Brak pełnej rezerwacji daje 409 i pozostawia wiadomość w kolejce. Przy błędzie cache po zapisie bazy odbiór może dać 503; po naprawie Redis ponów ten sam odbiór, aby usunąć cache i potwierdzić wiadomość bez drugiego rozchodu.
 
 ## 5. Logowanie i role
 

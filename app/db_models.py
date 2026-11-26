@@ -86,8 +86,12 @@ class OrderDispatchRow(Base):
 
 class ReservationBatchRow(Base):
     __tablename__ = "reservation_batches"
+    __table_args__ = (CheckConstraint("status IN ('RESERVED','CONSUMED')", name="reservation_batch_status_valid"),)
     order_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     items: Mapped[list] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="RESERVED")
+    shipment_id: Mapped[UUID | None] = mapped_column(Uuid, unique=True, nullable=True)
+    consumed_stock_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
 
 
 class ProcessedEventRow(Base):

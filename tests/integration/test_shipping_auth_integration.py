@@ -52,6 +52,9 @@ def test_full_reservation_packing_shipping_via_gateway(gateway_client, stock, re
     assert read.json()['status'] == 'SHIPPED' and read.headers['x-cache'] == 'MISS'
     assert gateway_client.post(path + '/hand-over').status_code == 409
     assert gateway_client.get(f"/api/stocks/{stock['id']}").json()['reservations'] == [{'order_id': order_id, 'quantity': 2}]
+    assert gateway_client.post('/api/reservations/consume-shipment-events').status_code == 200
+    settled = gateway_client.get(f"/api/stocks/{stock['id']}").json()
+    assert settled['quantity'] == 8 and settled['reservations'] == []
 
 
 def test_protected_endpoints_reject_missing_or_invalid_jwt(gateway_client):
