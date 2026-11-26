@@ -266,3 +266,11 @@ W panelu odpowiada temu **Inventory → Odbierz wydania przesyłek**. Outbound m
 Powiedz:
 
 > Shipping publikuje jedno zdarzenie do dwóch kolejek. Outbound ustawia SHIPPED, a Inventory odejmuje wydane sztuki i rozlicza rezerwację. Oba odbiory uruchamiamy ręcznie. Duplikat nie zmienia zamówienia ani ilości drugi raz.
+
+Opcjonalnie pokaż anulowanie na **osobnym zamówieniu RESERVED, przed pakowaniem**:
+
+1. Outbound: **POST /orders/{order_id}/cancel** → CANCELLED. Rezerwacja w Inventory jeszcze istnieje.
+2. Inventory: **POST /reservations/consume-cancellation-events** → rezerwacja znika, fizyczna ilość pozostaje bez zmian, a dostępność rośnie.
+3. Ponowne anulowanie nie wysyła kolejnej wiadomości; pakowanie CANCELLED daje 409. W bazie zostaje `reservation_batches` ze statusem RELEASED.
+
+W panelu są to **Anuluj zamówienie** i **Odbierz anulowania zamówień**. Po awarii brokera użyj **Ponów wysłanie anulowania**, a następnie odbierz wiadomość w Inventory.

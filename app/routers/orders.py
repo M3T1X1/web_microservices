@@ -93,6 +93,18 @@ def sync_reservation(order_id: UUID, service: OrderServiceDep):
     return service.sync_reservation(order_id)
 
 
+@router.post("/{order_id}/cancel", response_model=Order,
+             dependencies=[Depends(require_roles("WAREHOUSE"))], summary="Anuluj RESERVED przed pakowaniem")
+def cancel_order(order_id: UUID, service: OrderServiceDep):
+    return service.cancel(order_id)
+
+
+@router.post("/{order_id}/sync-cancellation", response_model=Order,
+             dependencies=[Depends(require_roles("WAREHOUSE"))], summary="Ponow publikacje anulowania")
+def sync_cancellation(order_id: UUID, service: OrderServiceDep):
+    return service.sync_cancellation(order_id)
+
+
 @router.get("/{order_id}/shipping-check", response_model=Order, dependencies=[Depends(require_roles("SHIPPING"))])
 def shipping_check(order_id: UUID, service: OrderServiceDep):
     # Decyzja o wysyłce zawsze czyta bazę, nie potencjalnie nieaktualny cache.

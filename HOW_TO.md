@@ -261,6 +261,10 @@ Oczekiwane: `201`, `NEW`. Zapisz `id` jako `ORDER_ID`.
 
 Rezerwacja nie zmniejsza pola `quantity`: nadal wynosi ono 10. Dostępność wynosi 8 po odebraniu zlecenia przez Inventory. Odbiory są ręczne; panel ma przyciski „Odbierz zlecenia rezerwacji” w Inventory i „Odbierz wyniki rezerwacji” w Outbound. Powtórzenie PENDING zachowuje ID próby, a RESERVED nie tworzy drugiej rezerwacji. Po odmowie `/reserve` tworzy nową próbę; powód jest w `reservation_error`. Po awarii brokera użyj Outbound `/orders/{id}/sync-reservation` albo Inventory `/reservations/sync-events`. Odbiór wyników wymaga WAREHOUSE/ADMIN, dotychczasowy odbiór wysyłki nadal SHIPPING/ADMIN.
 
+Wariant zamiast pakowania: gdy inne zamówienie ma RESERVED, wybierz **Outbound → Anuluj zamówienie** (`POST /api/orders/{id}/cancel`), potem **Inventory → Odbierz anulowania zamówień** (`POST /api/reservations/consume-cancellation-events`). Obie operacje wymagają WAREHOUSE/ADMIN. Zamówienie ma CANCELLED od pierwszego kroku, ale rezerwacja znika dopiero po drugim. Przy stanie 10 i rezerwacji 2 fizyczna ilość nadal wynosi 10, a dostępność rośnie z 8 do 10. `reservation_batches` zachowuje wpis RELEASED.
+
+Anulowanie przed RESERVED lub po PACKED daje 409. Powtórzenie CANCELLED i duplikat wiadomości są bezpieczne. Gdy publikacja zwróci 503, zamówienie może już mieć CANCELLED; po powrocie RabbitMQ kliknij **Ponów wysłanie anulowania** (`POST /api/orders/{id}/sync-cancellation`) i odbierz wiadomość w Inventory. Nie ma ponawiania w tle. Przed aktualizacją istniejącej bazy Inventory wykonaj najnowszą migrację `migrate_inventory_cancellations.py` według README.
+
 ### 4.6. Przesyłka — Shipping → Outbound
 
 ```http
@@ -324,7 +328,7 @@ Panel ma przycisk **Inventory → Odbierz wydania przesyłek**. Po odbiorze GET 
 
 Pusty ponowny odbiór potwierdza opróżnienie kolejki, ale sam nie dowodzi deduplikacji. Deduplikację osobno sprawdzają testy integracyjne przez ponowne wysłanie tego samego `event_id`; oczekiwane wtedy: jedna odebrana wiadomość, zero unikalnych przetworzeń.
 
-Przy aktualizacji istniejącego Inventory najpierw wykonaj `scripts/migrate_inventory_shipments.py` według README. Nowa kolejka nie odtwarza zdarzeń opublikowanych przed jej utworzeniem. Brak pełnej rezerwacji daje 409 i pozostawia wiadomość w kolejce. Przy błędzie cache po zapisie bazy odbiór może dać 503; po naprawie Redis ponów ten sam odbiór, aby usunąć cache i potwierdzić wiadomość bez drugiego rozchodu.
+Przy aktualizacji istniejącego Inventory najpierw wykonaj `scripts/migrate_inventory_cancellations.py` według README; obejmuje również wcześniejsze zmiany rozchodu. Nowa kolejka nie odtwarza zdarzeń opublikowanych przed jej utworzeniem. Brak pełnej rezerwacji daje 409 i pozostawia wiadomość w kolejce. Przy błędzie cache po zapisie bazy odbiór może dać 503; po naprawie Redis ponów ten sam odbiór, aby usunąć cache i potwierdzić wiadomość bez drugiego rozchodu.
 
 ## 5. Logowanie i role
 

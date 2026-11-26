@@ -6,7 +6,7 @@ from app.cache import JsonCache
 from app.models.order import Order, OrderCreate
 from app.models.events import (OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY, ShipmentHandedOver,
                               OUTBOUND_RESERVATION_QUEUE, RESERVATION_RESERVED_KEY, RESERVATION_REJECTED_KEY,
-                              reservation_request_id, reservation_result)
+                              reservation_request_id, reservation_result, cancellation_event_id)
 from app.messaging import BrokerUnavailableError, RabbitEventBroker
 from app.outbox import publish_event
 from app.repositories import OrderRepository
@@ -59,6 +59,22 @@ class OrderService:
         if result.reservation_notification_pending:
             return self.sync_reservation(order_id)
         return result
+
+    def cancel(self, order_id):
+        self.repository.cancel(order_id)
+        self.cache.delete(order_id)
+        return self.sync_cancellation(order_id)
+
+    def sync_cancellation(self, order_id):
+        order = self.repository.get(order_id)
+        if order.status != "CANCELLED":
+            raise HTTPException(409, "Order is not cancelled")
+        try:
+            publish_event(self.repository.sessions, self.event_broker, cancellation_event_id(order_id))
+        except BrokerUnavailableError as exc:
+            raise HTTPException(503, "RabbitMQ unavailable; order cancelled, retry sync-cancellation") from exc
+        self.cache.delete(order_id)
+        return order
 
     def sync_reservation(self, order_id):
         order = self.repository.get(order_id)

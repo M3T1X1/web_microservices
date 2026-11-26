@@ -78,7 +78,7 @@ def test_gateway_does_not_publish_technical_endpoints(gateway_client):
 def test_swagger_schemas_use_gateway_and_only_publish_routed_operations(gateway_client):
     allowed = {
         "inventory": ("/stocks", "/receipts", "/reservations/consume-events", "/reservations/sync-events",
-                      "/reservations/consume-shipment-events"),
+                      "/reservations/consume-shipment-events", "/reservations/consume-cancellation-events"),
         "outbound": ("/orders",),
         "shipping": ("/shipments",),
         "auth": ("/auth",),

@@ -124,6 +124,26 @@ def main():
             'next_attempt': next_attempt['reservation_attempt_id'], 'status': 'RESERVED'}
         page.screenshot(path=str(args.output / 'reservation-retry.png'))
 
+        operation('outbound', 'Anuluj zamówienie')
+        cancelled = send(200)
+        assert cancelled['id'] == reservation_order['id'] and cancelled['status'] == 'CANCELLED'
+        operation('outbound', 'Ponów wysłanie anulowania')
+        assert send(200)['status'] == 'CANCELLED'
+        operation('inventory', 'Odbierz anulowania zamówień')
+        released = send(200)
+        assert released['unique_events_processed'] == 1
+        assert send(200)['consumed_messages'] == 0
+        row = page.locator('#data-content tbody tr').filter(has_text=sku)
+        expect(row).to_contain_text('4')
+        row.click()
+        operation('inventory', 'Szczegóły stanu / cache')
+        with page.expect_response(lambda response: '/api/stocks/' in response.url and response.request.method == 'GET') as pending_read:
+            page.locator('#send-request').click()
+        current = pending_read.value.json()
+        assert current['quantity'] == 4 and current['reservations'] == []
+        results['manual_order_cancellation'] = 'PASS: CANCELLED, manual release, physical quantity unchanged'
+        page.screenshot(path=str(args.output / 'cancellation.png'))
+
         # Select a freshly created order and exercise the editable manual request.
         operation('outbound', 'Spakuj zamówienie')
         page.locator('#request-path').fill('/api/orders/' + str(uuid4()) + '/pack')

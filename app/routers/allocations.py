@@ -23,3 +23,8 @@ def sync_events(request: Request, limit: int = Query(default=50, ge=1, le=500)):
 @router.post("/consume-shipment-events", summary="Odbierz wydania przesylek i rozlicz stan magazynowy")
 def consume_shipment_events(request: Request, limit: int = Query(default=50, ge=1, le=500)):
     return request.app.state.inventory_shipping_service.consume(limit)
+
+
+@router.post("/consume-cancellation-events", summary="Odbierz anulowania zamowien i zwolnij rezerwacje")
+def consume_cancellation_events(request: Request, limit: int = Query(default=50, ge=1, le=500)):
+    return request.app.state.inventory_cancellation_service.consume(limit)

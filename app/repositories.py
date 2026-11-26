@@ -11,7 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.db_models import OrderDispatchRow, OrderRow, OutboxEventRow, ProcessedEventRow, ReceiptRow, ReservationBatchRow, StockRow
-from app.models.events import OrderReservationRequested, OrderStockReserved, RESERVATION_REQUEST_KEY, reservation_request_id
+from app.models.events import (OrderReservationRequested, OrderStockReserved, RESERVATION_REQUEST_KEY, reservation_request_id,
+                              OrderCancelled, CANCELLATION_ROUTING_KEY, cancellation_event_id)
 from app.models.order import Order, OrderCreate, normalized_items
 from app.models.receipt import Receipt, ReceiptCreate
 from app.models.stock import Reservation, Stock, StockUpdate
@@ -66,8 +67,8 @@ class StockRepository:
         with write_transaction(self.sessions) as db:
             row = self._find(db, stock_id, lock=True)
             batch = db.get(ReservationBatchRow, reservation.order_id)
-            if batch is not None and batch.status == "CONSUMED":
-                raise HTTPException(409, "Order reservation has already been consumed")
+            if batch is not None and batch.status in {"CONSUMED", "RELEASED"}:
+                raise HTTPException(409, "Order reservation has already been consumed or released")
             reserved = sum(item["quantity"] for item in row.reservations)
             if reservation.quantity > row.quantity - reserved:
                 raise HTTPException(409, "Insufficient available stock")
@@ -208,6 +209,21 @@ class OrderRepository:
     def dispatch(self, order_id, shipment_id):
         with write_transaction(self.sessions) as db:
             return self._dispatch(db, order_id, shipment_id)
+
+    def cancel(self, order_id):
+        with write_transaction(self.sessions) as db:
+            row = self._find(db, order_id, lock=True)
+            if row.status == "CANCELLED":
+                return order_payload(row)
+            if row.status != "RESERVED":
+                raise HTTPException(409, "Only RESERVED orders can be cancelled before packing")
+            event = OrderCancelled(event_id=cancellation_event_id(order_id), event_type="OrderCancelled",
+                                   order_id=order_id, items=normalized_items(row.items),
+                                   occurred_at=datetime.now(timezone.utc))
+            row.status = "CANCELLED"
+            db.add(OutboxEventRow(event_id=event.event_id, routing_key=CANCELLATION_ROUTING_KEY,
+                                 payload=event.model_dump(mode="json"), published=False))
+            return order_payload(row)
 
     def start_reservation(self, order_id):
         with write_transaction(self.sessions) as db:
