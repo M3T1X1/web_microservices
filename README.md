@@ -9,7 +9,37 @@ Swagger UI przez Gateway: `http://127.0.0.1:8080/docs/auth`, `/docs/inventory`, 
 
 Aktualny sposób uruchamiania to **Docker Compose**. Cztery mikrousługi, Eureka, Redis, RabbitMQ i Gateway działają w kontenerach. Dodatkowy kontener `init-keys` wykonuje jednorazową inicjalizację kluczy i kończy pracę kodem `0`; jego stan `Exited (0)` jest prawidłowy. Dokumentacja wcześniejszych etapów poniżej zachowuje historyczne przykłady uruchamiania na hoście.
 
+Healthcheck RabbitMQ sprawdza aktywny listener AMQP na porcie 5672, aby usługi deklarowały kolejki dopiero po gotowości połączeń brokera.
+
 ### Uruchomienie i pierwsze konto
+
+Aktualizacja rezerwacji: `/orders/{id}/reserve` korzysta teraz z RabbitMQ i zwraca **202 / RESERVATION_PENDING**. Dwa odbiory wykonuje użytkownik: Inventory `/reservations/consume-events`, potem Outbound `/orders/consume-reservation-events`. Dopiero wynik sukcesu ustawia RESERVED i pozwala pakować. Opisy wcześniejszej rezerwacji przez HTTP w historycznych etapach odnoszą się do poprzedniej wersji; `stock-check` nadal używa HTTP/Eureki.
+
+Przy aktualizacji istniejącej bazy Outbound **nie trzeba usuwać kont ani wolumenów**. Najpierw zatrzymaj Outbound i wykonaj migrację:
+
+```powershell
+docker compose stop outbound
+docker compose build outbound
+docker compose run --rm --no-deps outbound python scripts/migrate_reservations.py --database /data/outbound.db
+docker compose up --build -d
+```
+
+Skrypt kopiuje bazę do `/data/outbound-before-reservation-events-<czas>.db`, rozszerza ograniczenie statusów i dodaje metadane próby. Zachowuje zamówienia i pozostałe tabele; ponowne wykonanie jest bezpieczne. Nowe tabele `event_outbox` (obie usługi) i `processed_events` w Inventory tworzą się przy starcie. Przy pustej bazie migracja nie jest potrzebna. Konta Auth, klucze i baza Shipping pozostają niezależne od tej migracji.
+
+Inventory odbiera teraz również `ShipmentHandedOver` w osobnej kolejce `inventory.shipment-events`. Ręczne `/reservations/consume-shipment-events` odejmuje wydane sztuki z właściwych lokalizacji, usuwa aktywne rezerwacje i oznacza `reservation_batches` jako CONSUMED. Odbiór Outbound ustawia SHIPPED niezależnie. Panel ma osobne przyciski dla obu odbiorów; żaden nie działa w tle.
+
+Anulowanie: Outbound `/orders/{id}/cancel` zmienia RESERVED na CANCELLED i publikuje `OrderCancelled`. Inventory ręcznie odbiera `/reservations/consume-cancellation-events`, usuwa aktywne rezerwacje i zapisuje RELEASED. Ilość fizyczna pozostaje bez zmian, a dostępność rośnie. Pakowanie i ponowna rezerwacja anulowanego zamówienia są zablokowane. Nie anulujemy NEW, RESERVATION_PENDING, RESERVATION_REJECTED, PACKED ani SHIPPED; powtórzenie CANCELLED jest bezpieczne.
+
+Przy istniejącej bazie Inventory wykonaj jednorazową migrację (z kopią zapasową):
+
+```powershell
+docker compose stop inventory
+docker compose build inventory
+docker compose run --rm --no-deps inventory python scripts/migrate_inventory_cancellations.py --database /data/inventory.db
+docker compose up --build -d
+```
+
+Migracja zachowuje stany, przyjęcia i rezerwacje, w tym wcześniejsze CONSUMED i ID przesyłek. Obsługuje też starą tabelę z samymi `order_id` i `items`: te wpisy dostają RESERVED. Dodaje RELEASED i `released_stock_ids` do naprawy cache. Zastępuje potrzebę osobnego uruchamiania wcześniejszego `migrate_inventory_shipments.py`. Pusta baza tworzy poprawny schemat automatycznie. Outbound nie potrzebuje kolejnej zmiany schematu: CANCELLED i outbox już istnieją. Nowa kolejka dostaje zdarzenia publikowane po jej utworzeniu; historyczne, wcześniej wysłane wiadomości nie są automatycznie odtwarzane.
 
 Wymagania do uruchomienia: działający Docker Engine / Docker Desktop z Docker Compose v2. Python, Java i Maven na hoście nie są potrzebne. Budowanie wymaga dostępu do rejestru obrazów, PyPI i Maven Central. Polecenia wykonuj w głównym katalogu projektu:
 
@@ -95,6 +125,7 @@ flowchart TB
         S -->|HTTP z JWT, Eureka| O
         S -->|ShipmentHandedOver| Q
         Q -->|consume-events, ACK, deduplikacja| O
+        Q -->|ręczne rozliczenie towaru| I
         I --> R
         O --> R
         G -. rejestr .-> E
@@ -222,12 +253,12 @@ Zaimplementowane są **Inventory, Outbound, Shipping i Auth**. Każda usługa dz
 
 | Usługa | Plik startowy | Port | Baza / tabele | Odpowiedzialność |
 |---|---|---|---|---|
-| Inventory | `app/inventory.py` | 8101 | `inventory.db`: stocks, receipts, reservation_batches | Stany, przyjęcia, rezerwacje |
-| Outbound | `app/outbound.py` | 8102 | `outbound.db`: orders, order_dispatches, processed_events | Zamówienia, rezerwowanie przez Inventory, pakowanie i potwierdzanie wysyłki |
+| Inventory | `app/inventory.py` | 8101 | `inventory.db`: stocks, receipts, reservation_batches, processed_events, event_outbox | Stany, przyjęcia, rezerwacje |
+| Outbound | `app/outbound.py` | 8102 | `outbound.db`: orders, order_dispatches, processed_events, event_outbox | Zamówienia, rezerwowanie przez Inventory, pakowanie i potwierdzanie wysyłki |
 | Shipping | `app/shipping.py` | 8103 | `shipping.db`: shipments | Przesyłki, przygotowanie, wydanie kurierowi i zdarzenie dla Outbound przez RabbitMQ |
 | Auth | `app/auth.py` | 8104 | `auth.db`: users | Konta, Argon2id, logowanie, JWT RS256 i role |
 
-Gateway jest publikowany na 127.0.0.1:8080. Eureka :8761, Redis :6379 i RabbitMQ :5672 (panel :15672) są dostępne w sieci Compose. Auth nie korzysta z Redis. Shipping zapisuje i czyta przesyłki bez cache; wspólna fabryka inicjalizuje adapter Redis i uwzględnia go w `/ready`, lecz jego awaria nie blokuje operacji na przesyłkach. Wszystkie usługi mają dostęp do wspólnego adaptera RabbitMQ; obecnie używa go tylko zdarzenie Shipping → Outbound. Szczegóły w [LAB5](#lab5).
+Gateway jest publikowany na 127.0.0.1:8080. Eureka :8761, Redis :6379 i RabbitMQ :5672 (panel :15672) są dostępne w sieci Compose. Auth nie korzysta z Redis. Shipping zapisuje i czyta przesyłki bez cache; wspólna fabryka inicjalizuje adapter Redis i uwzględnia go w `/ready`, lecz jego awaria nie blokuje operacji na przesyłkach. Wszystkie usługi mają dostęp do wspólnego adaptera RabbitMQ; używają go rezerwacje Outbound ↔ Inventory oraz wydanie Shipping → Outbound. Wszystkie odbiory są ręczne.
 
 ```mermaid
 flowchart TB
@@ -236,10 +267,14 @@ flowchart TB
     G --> O[Outbound :8102]
     G --> S[Shipping :8103]
     G --> A[Auth :8104]
-    O -->|HTTP z JWT: rezerwacja i odczyt| I
+    O -->|HTTP z JWT: stock-check| I
     S -->|HTTP z JWT: sprawdzenie PACKED| O
     S -->|ShipmentHandedOver| B[RabbitMQ :5672]
     B -->|ręczny odbiór w Outbound| O
+    O -->|OrderReservationRequested| B
+    O -->|OrderCancelled| B
+    B -->|ręczny odbiór rezerwacji, wydań i anulowań w Inventory| I
+    I -->|OrderStockReserved / OrderStockReservationRejected| B
     I --> ID[(inventory.db)]
     O --> OD[(outbound.db)]
     S --> SD[(shipping.db)]
@@ -373,9 +408,17 @@ Poniżej ścieżki widziane przez klienta Gateway (:8080); `StripPrefix=1` usuwa
 | GET `/api/auth/me` | Profil aktywnego użytkownika, bez hasha | Każda zalogowana rola |
 | POST `/api/auth/users` | Konto: email, password, role; sukces 201 | ADMIN |
 | PATCH `/api/auth/users/{id}` | `{"is_active":false}` lub true; ostatni aktywny administrator nie może zostać wyłączony | ADMIN |
-| POST `/api/orders/{id}/reserve` | Rezerwacja wszystkich pozycji przez Inventory i status RESERVED | WAREHOUSE, ADMIN |
+| POST `/api/orders/{id}/reserve` | 202; NEW/RESERVATION_REJECTED → RESERVATION_PENDING i publikacja zlecenia | WAREHOUSE, ADMIN |
+| POST `/api/orders/{id}/sync-reservation` | Ręczne ponowienie wysłania tej samej zapisanej próby | WAREHOUSE, ADMIN |
+| POST `/api/reservations/consume-events` | Inventory odbiera zlecenia, wykonuje Allocation i publikuje wyniki | WAREHOUSE, ADMIN |
+| POST `/api/reservations/sync-events` | Ręczne wysłanie oczekujących wyników Inventory | WAREHOUSE, ADMIN |
+| POST `/api/reservations/consume-shipment-events` | Inventory odbiera wydania, odejmuje ilości i rozlicza rezerwacje | WAREHOUSE, ADMIN |
+| POST `/api/orders/consume-reservation-events` | Outbound odbiera sukces/odmowę rezerwacji | WAREHOUSE, ADMIN |
 | POST `/api/orders/{id}/pack` | RESERVED → PACKED | WAREHOUSE, ADMIN |
-| POST `/api/orders/consume-events` | Ręczny odbiór zdarzeń z RabbitMQ; domyślnie maksymalnie 50 | SHIPPING, ADMIN |
+| POST `/api/orders/{id}/cancel` | RESERVED → CANCELLED i publikacja OrderCancelled; ponowienie CANCELLED jest bezpieczne | WAREHOUSE, ADMIN |
+| POST `/api/orders/{id}/sync-cancellation` | Ręczne ponowienie publikacji zapisanego anulowania | WAREHOUSE, ADMIN |
+| POST `/api/reservations/consume-cancellation-events` | Inventory zwalnia rezerwacje i zapisuje RELEASED bez zmiany ilości fizycznej | WAREHOUSE, ADMIN |
+| POST `/api/orders/consume-events` | Ręczny odbiór wydań przesyłek i ustawienie SHIPPED; domyślnie maksymalnie 50 | SHIPPING, ADMIN |
 | POST `/api/shipments` | order_id, destination_address, courier_id, weight_kg; nowe NEW, sukces 201 | SHIPPING, ADMIN |
 | GET `/api/shipments`, GET `/api/shipments/{id}` | Lista i szczegóły przesyłek | SHIPPING, ADMIN |
 | POST `/api/shipments/{id}/ready` | NEW → READY; sprawdza PACKED w Outbound | SHIPPING, ADMIN |
@@ -399,17 +442,27 @@ Przykłady JSON:
 
 Każde żądanie domenowe wymaga `Authorization: Bearer <access_token>`. Gateway przekazuje ten nagłówek, a wywołania HTTP Outbound → Inventory i Shipping → Outbound zachowują token użytkownika oraz `Content-Type: application/json` przy wysyłaniu JSON. Zdarzenie RabbitMQ nie zawiera tokenu; operacja uruchamiająca odbiór wymaga JWT. Bramka nie sprawdza reguł biznesowych i nie łączy się z bazami.
 
-Przykładowa kolejność przez Gateway: zaloguj administratora, utwórz pracownika WAREHOUSE i SHIPPING, utwórz zamówienie, wykonaj `/reserve`, `/pack`, utwórz przesyłkę, wykonaj `/ready` i `/hand-over`, następnie `/orders/consume-events`. Dopiero po odbiorze zamówienie ma SHIPPED; przesyłka ma HANDED_OVER już po wydaniu kurierowi.
+Przykładowa kolejność przez Gateway: zaloguj administratora, utwórz pracownika WAREHOUSE i SHIPPING, utwórz zamówienie, wykonaj `/reserve`, odbierz zlecenie w Inventory i wynik w Outbound, potem `/pack`, utwórz przesyłkę, wykonaj `/ready` i `/hand-over`. Następnie ręcznie wykonaj `/orders/consume-events` (SHIPPED) oraz `/reservations/consume-shipment-events` (rozchód towaru). Te dwa odbiory mogą nastąpić w dowolnej kolejności; przesyłka ma HANDED_OVER już po wydaniu kurierowi.
 
-Rezerwacja zbiorcza Inventory (`POST /reservations`, tylko port Inventory) obejmuje wszystkie SKU i lokalizacje w jednej transakcji. Brak towaru daje 409 i rollback całej operacji. Zapisuje żądanie według order_id, więc utracona odpowiedź lub ponowienie po błędzie zapisu Outbound nie rezerwuje towaru drugi raz. Zmienione pozycje pod tym samym order_id dają 409. Outbound nadaje RESERVED dopiero po poprawnym potwierdzeniu. Nie dodano zewnętrznej trasy `/api/reservations`; klient korzysta z operacji na zamówieniu.
+Rezerwacja zbiorcza korzysta z `OrderReservationRequested` → `OrderStockReserved` albo `OrderStockReservationRejected`. Nie ma konsumenta ani publikatora w tle. Inventory wykorzystuje tę samą logikę Allocation w transakcji `BEGIN IMMEDIATE`; brak dowolnej pozycji cofa całą alokację, ale zapisuje wynik odmowy i potwierdza obsłużenie wiadomości. Sukces zapisuje rezerwacje i wynik przed publikacją. Bezpośrednie HTTP `POST /reservations` pozostało do zgodności, jest ukryte w Swaggerze i nie ma trasy Gateway; opublikowano jedynie `/api/reservations/consume-events` i `/sync-events`.
+
+Pole `reservation_attempt_id` wskazuje aktywną próbę. Powtórzenie PENDING zachowuje to samo ID i payload; RESERVED nie rezerwuje ponownie. Dopiero `/reserve` po RESERVATION_REJECTED tworzy nową próbę. Stare wyniki nie zmieniają nowszej próby. `reservation_error` zawiera powód odmowy; zamówienie nie jest usuwane. `reservation_notification_pending=true` oznacza niewysłane zlecenie, nie oczekiwanie na biznesowy wynik.
+
+Wiadomości wychodzące są zapisywane w `event_outbox` razem ze zmianą bazy. Błąd brokera daje 503 i zachowuje dane do ręcznego `/sync`. Inventory przechowuje obsłużone zlecenia i odpowiedzi, więc nawet po restarcie nie wykonuje ponownie tej samej próby. Outbound również zapisuje przetworzone wyniki. ACK następuje po zatwierdzeniu obsługi i usunięciu cache; nieudane DEL można naprawić ponowieniem bez drugiej rezerwacji. Wszystkie odbiory mają `limit` 1–500, domyślnie 50. Dla każdego odbiorcy jest osobna trwała kolejka, w tym `inventory.reservation-requests` i `outbound.reservation-results`.
+
+Panel zawiera ręczne przyciski tych operacji oraz kolumny statusu, ID próby, powodu odmowy i oczekującej publikacji. Istniejący scenariusz pełnej wysyłki uwzględnia nowe etapy; liczba scenariuszy pozostaje bez zmian.
 
 Wydanie kurierowi i wpis `notification_pending=true` są jedną transakcją Shipping. Potem usługa publikuje zdarzenie. Awaria RabbitMQ daje 503, ale przesyłka pozostaje HANDED_OVER z oczekującym powiadomieniem. Po przywróceniu brokera wywołaj `/sync` z ważnym tokenem: ponowi publikację z tym samym event_id. Potwierdzenie RabbitMQ ustawia false; oznacza przyjęcie wiadomości przez broker, a nie jej przetworzenie przez Outbound. Publikacja i odbiór nie mają automatycznego procesu w tle; stan oczekujący przetrwa restart.
 
-Ograniczenia: jedna przesyłka na zamówienie, także po jej anulowaniu; brak etykiet i numerów śledzenia. Rezerwacje po wysyłce pozostają zapisane w Inventory — nie dodano fizycznego rozchodu towaru ani zwalniania rezerwacji. Nie ma transakcji obejmującej dwie bazy; dlatego jawnie obsługujemy ponowienia i stan oczekującego powiadomienia. Nie dodano paczkomatów ani integracji z przewoźnikiem.
+Inventory rozlicza całe zamówienie w jednej transakcji BEGIN IMMEDIATE: sprawdza zgodność aktywnych rezerwacji z `reservation_batches`, odejmuje ilości z konkretnych lokalizacji, usuwa aktywne rezerwacje i zapisuje CONSUMED oraz `processed_events`. Zachowuje ID przesyłki i dotkniętych stanów. Duplikat nie odejmuje ponownie i naprawia ewentualne nieudane DEL cache przed ACK. Brak pełnej rezerwacji daje 409 bez zmian, a wiadomość pozostaje do ponowienia. CONSUMED blokuje nową rezerwację tego zamówienia, również przez bezpośredni endpoint stanu.
+
+Anulowanie i wiadomość `OrderCancelled` zapisują się atomowo w Outbound (`event_outbox`). Awaria publikacji daje 503, lecz zamówienie pozostaje CANCELLED. Po powrocie brokera użyj `/orders/{id}/sync-cancellation`, potem ręcznego odbioru Inventory. ID zdarzenia i payload pozostają takie same przy ponowieniu. Inventory ma kolejkę `inventory.order-cancellations`; zwolnienie całej rezerwacji, RELEASED i `processed_events` zapisują się w jednej transakcji. Duplikat naprawia cache przed ACK, nie zmienia ilości i nie zwalnia innych zamówień. CONSUMED nie można zwolnić, a RELEASED nie można ponownie zarezerwować ani rozliczyć jako wysyłki. Jednoczesne pakowanie i anulowanie rozstrzyga transakcja Outbound: tylko jedna operacja wygrywa.
+
+Ograniczenia: anulowanie zamówienia jest dostępne tylko z RESERVED przed pakowaniem. Jedna przesyłka na zamówienie, także po jej anulowaniu; brak etykiet i numerów śledzenia. Nie ma transakcji obejmującej dwie bazy; dlatego jawnie obsługujemy ponowienia i stan oczekującego powiadomienia. Nie dodano paczkomatów ani integracji z przewoźnikiem.
 
 ### Testy nowych usług
 
-Weryfikacja z 22.11.2026: **131 testów jednostkowych i komponentowych oraz 12 integracyjnych przeszło**. Pełny zestaw działał z Redis i RabbitMQ w Dockerze oraz Eureką i Gateway na JDK 21/Maven. Sprawdzono publikację, odbiór, cache, duplikaty, awarię brokera i powrót wyłączonego Outbound. Testy wykonano na tymczasowych bazach, kluczach, prefiksie Redis i vhoście RabbitMQ, po czym zatrzymano własne procesy. Szczegóły i [raport](reports/lab5-verification.json) w [LAB5](#lab5).
+Weryfikacja rezerwacji, rozchodu i anulowania z 26.11.2026: **184 testy jednostkowe i komponentowe oraz 17 integracyjnych przeszło**. Na osobnych projektach Compose sprawdzono prawdziwy RabbitMQ, restart brokera z oczekującym zleceniem, ręczne ponowienie publikacji oraz duplikaty bez drugiej rezerwacji, rozchodu ani zwolnienia. Inventory i Outbound odbierają niezależne kopie wydania. Sprawdzono też świeży start z healthcheckiem portu AMQP. W Chrome przeszły istniejące scenariusze panelu (pełny przepływ 40/40), ręczne anulowanie i zwolnienie bez zmiany ilości fizycznej, odbiór wydań oraz odmowa → uzupełnienie stanu → nowa próba → RESERVED. Testy korzystały z osobnych baz, kont i wolumenów; nie migrowały danych uruchomionej aplikacji.
 
 ```bash
 # Szybkie testy: SQLite, podpisy RSA, atrapy Redis, RabbitMQ i discovery

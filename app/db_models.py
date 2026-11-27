@@ -37,7 +37,7 @@ class ReceiptRow(Base):
 class OrderRow(Base):
     __tablename__ = "orders"
     __table_args__ = (CheckConstraint(
-        "status IN ('NEW', 'RESERVED', 'PACKED', 'SHIPPED', 'CANCELLED')",
+        "status IN ('NEW', 'RESERVATION_PENDING', 'RESERVATION_REJECTED', 'RESERVED', 'PACKED', 'SHIPPED', 'CANCELLED')",
         name="order_status_valid",
     ),)
 
@@ -47,6 +47,10 @@ class OrderRow(Base):
     recipient_address: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     items: Mapped[list] = mapped_column(JSON, nullable=False)
+
+    reservation_attempt_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    reservation_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    reservation_notification_pending: Mapped[bool] = mapped_column(nullable=False, default=False)
 
 
 class UserRow(Base):
@@ -82,8 +86,13 @@ class OrderDispatchRow(Base):
 
 class ReservationBatchRow(Base):
     __tablename__ = "reservation_batches"
+    __table_args__ = (CheckConstraint("status IN ('RESERVED','CONSUMED','RELEASED')", name="reservation_batch_status_valid"),)
     order_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     items: Mapped[list] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="RESERVED")
+    shipment_id: Mapped[UUID | None] = mapped_column(Uuid, unique=True, nullable=True)
+    consumed_stock_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    released_stock_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
 
 
 class ProcessedEventRow(Base):
@@ -91,3 +100,11 @@ class ProcessedEventRow(Base):
     event_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     event_type: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class OutboxEventRow(Base):
+    __tablename__ = "event_outbox"
+    event_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    routing_key: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    published: Mapped[bool] = mapped_column(nullable=False, default=False)

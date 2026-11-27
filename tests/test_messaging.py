@@ -29,7 +29,7 @@ def test_event_waits_for_consume_and_invalidates_cache(world):
     clients, tokens, _, _ = world
     order, shipment = handed_over(world)
     broker = clients['shipping'].app.state.event_broker
-    key, event = broker.published[0]
+    key, event = broker.published[-1]
     assert key == SHIPMENT_ROUTING_KEY
     assert event['event_type'] == 'ShipmentHandedOver'
     assert event['shipment_id'] == shipment['id'] and event['order_id'] == order['id']
@@ -51,12 +51,13 @@ def test_duplicate_and_extra_fields_apply_once(world):
     clients, tokens, _, _ = world
     handed_over(world)
     broker = clients['shipping'].app.state.event_broker
-    key, event = broker.published[0]
+    key, event = broker.published[-1]
     broker.publish(key, {**event, 'future_field': {'ignored': True}})
     result = clients['outbound'].post('/orders/consume-events', headers=tokens['SHIPPING'])
     assert result.json() == {'consumed_messages': 2, 'unique_events_processed': 1}
     with clients['outbound'].app.state.order_repository.sessions() as db:
-        assert db.scalar(select(func.count()).select_from(ProcessedEventRow)) == 1
+        assert db.scalar(select(func.count()).select_from(ProcessedEventRow).where(
+            ProcessedEventRow.event_type == 'ShipmentHandedOver')) == 1
         assert db.scalar(select(func.count()).select_from(OrderDispatchRow)) == 1
 
 
@@ -68,7 +69,7 @@ def test_invalid_operations_do_not_publish(world):
     assert client.post(f"/shipments/{uuid4()}/hand-over", headers=headers).status_code == 404
     assert client.post('/shipments', headers=headers, json={
         'order_id': shipment['order_id'], 'destination_address': 'Warszawa, Testowa 1', 'courier_id': '22222222-2222-4222-8222-222222222222', 'weight_kg': -1}).status_code == 422
-    assert client.app.state.event_broker.published == []
+    assert not any(key == SHIPMENT_ROUTING_KEY for key, _ in client.app.state.event_broker.published)
 
 
 def test_broker_outage_keeps_pending_fact_and_sync_recovers(world):
@@ -88,9 +89,9 @@ def test_broker_outage_keeps_pending_fact_and_sync_recovers(world):
     assert client.post(path + '/hand-over', headers=headers).status_code == 409
     broker.down = False
     assert client.post(path + '/sync', headers=headers).json()['notification_pending'] is False
-    assert broker.published[0][1]['event_id'] == str(expected.event_id)
+    assert broker.published[-1][1]['event_id'] == str(expected.event_id)
     assert client.post(path + '/sync', headers=headers).status_code == 200
-    assert len(broker.published) == 1
+    assert sum(key == SHIPMENT_ROUTING_KEY for key, _ in broker.published) == 1
     assert clients['outbound'].post('/orders/consume-events', headers=headers).json()['unique_events_processed'] == 1
     assert clients['outbound'].get(f"/orders/{order['id']}", headers=tokens['WAREHOUSE']).json()['status'] == 'SHIPPED'
 

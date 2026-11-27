@@ -1,12 +1,14 @@
 from uuid import UUID
-from urllib.error import HTTPError, URLError
 from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.cache import JsonCache
 from app.models.order import Order, OrderCreate
-from app.models.events import OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY, ShipmentHandedOver
+from app.models.events import (OUTBOUND_SHIPMENT_QUEUE, SHIPMENT_ROUTING_KEY, ShipmentHandedOver,
+                              OUTBOUND_RESERVATION_QUEUE, RESERVATION_RESERVED_KEY, RESERVATION_REJECTED_KEY,
+                              reservation_request_id, reservation_result, cancellation_event_id)
 from app.messaging import BrokerUnavailableError, RabbitEventBroker
+from app.outbox import publish_event
 from app.repositories import OrderRepository
 from app.services.cached_read import cached_read
 
@@ -51,31 +53,62 @@ class OrderService:
         self.cache.delete(order_id)
         return result
 
-    async def reserve(self, order_id, discovery, headers):
+    def reserve(self, order_id):
+        result = self.repository.start_reservation(order_id)
+        self.cache.delete(order_id)
+        if result.reservation_notification_pending:
+            return self.sync_reservation(order_id)
+        return result
+
+    def cancel(self, order_id):
+        self.repository.cancel(order_id)
+        self.cache.delete(order_id)
+        return self.sync_cancellation(order_id)
+
+    def sync_cancellation(self, order_id):
         order = self.repository.get(order_id)
-        if order.status == "RESERVED":
-            return order
-        if order.status != "NEW":
-            raise HTTPException(409, "Only NEW orders can be reserved")
-        if discovery is None:
-            raise HTTPException(503, "Inventory Service is unavailable")
+        if order.status != "CANCELLED":
+            raise HTTPException(409, "Order is not cancelled")
         try:
-            confirmation = await discovery.do_service(
-                "INVENTORY-SERVICE", "/reservations", return_type="json", prefer_ip=True,
-                timeout=3, method="POST", headers=headers,
-                data={"order_id": str(order.id), "items": [item.model_dump() for item in order.items]},
-            )
-        except HTTPError as exc:
-            if exc.code in {401, 403, 409}:
-                raise HTTPException(exc.code, "Inventory rejected the reservation") from exc
-            raise HTTPException(502, "Inventory Service returned an HTTP error") from exc
-        except (URLError, TimeoutError, ConnectionError) as exc:
-            raise HTTPException(503, "Inventory Service is unavailable") from exc
-        if not isinstance(confirmation, dict) or confirmation.get("order_id") != str(order.id) or confirmation.get("status") != "RESERVED":
-            raise HTTPException(502, "Inventory Service returned invalid reservation confirmation")
-        result = self.repository.mark_reserved(order_id)
+            publish_event(self.repository.sessions, self.event_broker, cancellation_event_id(order_id))
+        except BrokerUnavailableError as exc:
+            raise HTTPException(503, "RabbitMQ unavailable; order cancelled, retry sync-cancellation") from exc
+        self.cache.delete(order_id)
+        return order
+
+    def sync_reservation(self, order_id):
+        order = self.repository.get(order_id)
+        if order.reservation_attempt_id is None:
+            raise HTTPException(409, "Order has no reservation request to synchronize")
+        try:
+            publish_event(self.repository.sessions, self.event_broker,
+                          reservation_request_id(order.reservation_attempt_id))
+        except BrokerUnavailableError as exc:
+            raise HTTPException(503, "RabbitMQ unavailable; request saved, retry sync-reservation") from exc
+        result = self.repository.confirm_reservation_publication(order_id, order.reservation_attempt_id)
         self.cache.delete(order_id)
         return result
+
+    def consume_reservation_events(self, limit=50):
+        unique = 0
+
+        def handle(payload):
+            nonlocal unique
+            event = reservation_result(payload)
+            applied = self.repository.apply_reservation_result(event)
+            if not self.cache.delete(event.order_id):
+                raise HTTPException(503, "Cache invalidation failed; result remains queued")
+            unique += int(applied)
+
+        try:
+            for key in (RESERVATION_RESERVED_KEY, RESERVATION_REJECTED_KEY):
+                self.event_broker.bind_queue(OUTBOUND_RESERVATION_QUEUE, key)
+            consumed = self.event_broker.consume_available(OUTBOUND_RESERVATION_QUEUE, handle, limit=limit)
+        except BrokerUnavailableError as exc:
+            raise HTTPException(503, "RabbitMQ broker is unavailable") from exc
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise HTTPException(422, "Invalid reservation result; message remains queued") from exc
+        return {"consumed_messages": consumed, "unique_events_processed": unique}
 
     def dispatch(self, order_id, shipment_id):
         result = self.repository.dispatch(order_id, shipment_id)

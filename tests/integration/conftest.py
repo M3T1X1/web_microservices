@@ -50,3 +50,19 @@ def stock(gateway_client):
     assert gateway_client.post(path + "/accept").status_code == 200
     assert gateway_client.post(path + "/post").status_code == 200
     return next(item for item in gateway_client.get('/api/stocks').json() if item['sku'] == sku)
+
+
+@pytest.fixture
+def reserve_order(gateway_client):
+    def reserve(path):
+        response = gateway_client.post(path + '/reserve')
+        assert response.status_code == 202, response.text
+        assert response.json()['status'] == 'RESERVATION_PENDING'
+        assert gateway_client.post(path + '/pack').status_code == 409
+        assert gateway_client.post('/api/reservations/consume-events').status_code == 200
+        assert gateway_client.get(path).json()['status'] == 'RESERVATION_PENDING'
+        assert gateway_client.post('/api/orders/consume-reservation-events').status_code == 200
+        response = gateway_client.get(path)
+        assert response.json()['status'] == 'RESERVED'
+        return response
+    return reserve

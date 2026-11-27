@@ -19,7 +19,8 @@ def test_write_and_read(client, order_body):
     response = client.post("/orders", json=order_body)
     assert response.status_code == 201
     order = response.json()
-    assert order == {**order_body, "id": order["id"], "status": "NEW"}
+    assert order == {**order_body, "id": order["id"], "status": "NEW", 'reservation_attempt_id': None,
+                     'reservation_error': None, 'reservation_notification_pending': False}
 
     response = client.get(f"/orders/{order['id']}")
     assert response.status_code == 200

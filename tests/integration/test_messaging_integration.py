@@ -7,14 +7,14 @@ from app.models.shipment import Shipment
 pytestmark = pytest.mark.integration
 
 
-def test_duplicate_message_updates_order_once_and_invalidates_cache(gateway_client, stock, publish_event):
+def test_duplicate_message_updates_order_once_and_invalidates_cache(gateway_client, stock, publish_event, reserve_order):
     client = gateway_client
     order_response = client.post('/api/orders', json={'recipient_name': 'RabbitMQ test', 'recipient_phone': '1',
         'recipient_address': 'Test', 'items': [{'sku': stock['sku'], 'quantity': 1}]})
     assert order_response.status_code == 201
     order = order_response.json()
     order_path = f"/api/orders/{order['id']}"
-    assert client.post(order_path + '/reserve').status_code == 200
+    reserve_order(order_path)
     assert client.post(order_path + '/pack').status_code == 200
     client.get(order_path)
     assert client.get(order_path).headers['x-cache'] == 'HIT'
@@ -34,3 +34,15 @@ def test_duplicate_message_updates_order_once_and_invalidates_cache(gateway_clie
     assert read.json()['status'] == 'SHIPPED' and read.headers['x-cache'] == 'MISS'
     assert read.headers['x-gateway'] == 'lab4'
     assert client.get(order_path).headers['x-cache'] == 'HIT'
+    stock_path = '/api/stocks/' + stock['id']
+    before = client.get(stock_path)
+    assert before.json()['quantity'] == 10
+    assert before.json()['reservations'] == [{'order_id': order['id'], 'quantity': 1}]
+    assert client.get(stock_path).headers['x-cache'] == 'HIT'
+    consumed = client.post('/api/reservations/consume-shipment-events')
+    assert consumed.status_code == 200, consumed.text
+    assert consumed.json() == {'consumed_messages': 2, 'unique_events_processed': 1}
+    after = client.get(stock_path)
+    assert after.headers['x-cache'] == 'MISS'
+    assert after.json()['quantity'] == 9 and after.json()['reservations'] == []
+    assert client.post('/api/reservations/consume-shipment-events').json()['consumed_messages'] == 0

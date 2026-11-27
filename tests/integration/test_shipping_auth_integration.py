@@ -22,16 +22,14 @@ def test_auth_create_login_me_and_role_enforcement(gateway_client):
         json={'email': f'{uuid4().hex}@example.com', 'password': password, 'role': 'ADMIN'}).status_code == 403
 
 
-def test_full_reservation_packing_shipping_via_gateway(gateway_client, stock):
+def test_full_reservation_packing_shipping_via_gateway(gateway_client, stock, reserve_order):
     body = {'recipient_name': 'Test wysyłki', 'recipient_phone': '123456789', 'recipient_address': 'Adres testowy',
             'items': [{'sku': stock['sku'], 'quantity': 2}]}
     response = gateway_client.post('/api/orders', json=body)
     assert response.status_code == 201
     order_path = f"/api/orders/{response.json()['id']}"
     order_id = response.json()['id']
-    response = gateway_client.post(order_path + '/reserve')
-    assert response.status_code == 200, response.text
-    assert response.json()['status'] == 'RESERVED'
+    reserve_order(order_path)
     assert gateway_client.post(order_path + '/pack').json()['status'] == 'PACKED'
     gateway_client.get(order_path)
     assert gateway_client.get(order_path).headers['x-cache'] == 'HIT'
@@ -54,6 +52,9 @@ def test_full_reservation_packing_shipping_via_gateway(gateway_client, stock):
     assert read.json()['status'] == 'SHIPPED' and read.headers['x-cache'] == 'MISS'
     assert gateway_client.post(path + '/hand-over').status_code == 409
     assert gateway_client.get(f"/api/stocks/{stock['id']}").json()['reservations'] == [{'order_id': order_id, 'quantity': 2}]
+    assert gateway_client.post('/api/reservations/consume-shipment-events').status_code == 200
+    settled = gateway_client.get(f"/api/stocks/{stock['id']}").json()
+    assert settled['quantity'] == 8 and settled['reservations'] == []
 
 
 def test_protected_endpoints_reject_missing_or_invalid_jwt(gateway_client):

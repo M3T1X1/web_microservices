@@ -77,7 +77,8 @@ def test_gateway_does_not_publish_technical_endpoints(gateway_client):
 
 def test_swagger_schemas_use_gateway_and_only_publish_routed_operations(gateway_client):
     allowed = {
-        "inventory": ("/stocks", "/receipts"),
+        "inventory": ("/stocks", "/receipts", "/reservations/consume-events", "/reservations/sync-events",
+                      "/reservations/consume-shipment-events", "/reservations/consume-cancellation-events"),
         "outbound": ("/orders",),
         "shipping": ("/shipments",),
         "auth": ("/auth",),
@@ -103,7 +104,8 @@ def test_outbound_order_write_and_read(gateway_client):
     response = gateway_client.post("/api/orders", json=body)
     assert_gateway(response, 201)
     order = response.json()
-    assert order == {**body, "id": order["id"], "status": "NEW"}
+    assert order == {**body, "id": order["id"], "status": "NEW", "reservation_attempt_id": None,
+                     "reservation_error": None, "reservation_notification_pending": False}
     response = gateway_client.get(f"/api/orders/{order['id']}")
     assert_gateway(response)
     assert response.json() == order

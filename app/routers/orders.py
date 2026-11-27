@@ -28,6 +28,12 @@ def consume_events(service: OrderServiceDep, limit: int = Query(default=50, ge=1
     return service.consume_events(limit)
 
 
+@router.post("/consume-reservation-events", dependencies=[Depends(require_roles("WAREHOUSE"))],
+             summary="Odbierz wyniki rezerwacji z Inventory")
+def consume_reservation_events(service: OrderServiceDep, limit: int = Query(default=50, ge=1, le=500)):
+    return service.consume_reservation_events(limit)
+
+
 @router.post("", response_model=Order, status_code=201, dependencies=[Depends(require_roles("WAREHOUSE"))])
 def create_order(body: OrderCreate, service: OrderServiceDep) -> Order:
     return service.create(body)
@@ -75,9 +81,28 @@ def pack_order(order_id: UUID, service: OrderServiceDep) -> Order:
     return service.pack(order_id)
 
 
-@router.post("/{order_id}/reserve", response_model=Order, dependencies=[Depends(require_roles("WAREHOUSE"))])
-async def reserve_order(order_id: UUID, request: Request, service: OrderServiceDep):
-    return await service.reserve(order_id, request.app.state.eureka_client, forwarded_headers(request))
+@router.post("/{order_id}/reserve", response_model=Order, status_code=202,
+             dependencies=[Depends(require_roles("WAREHOUSE"))])
+def reserve_order(order_id: UUID, service: OrderServiceDep):
+    return service.reserve(order_id)
+
+
+@router.post("/{order_id}/sync-reservation", response_model=Order,
+             dependencies=[Depends(require_roles("WAREHOUSE"))])
+def sync_reservation(order_id: UUID, service: OrderServiceDep):
+    return service.sync_reservation(order_id)
+
+
+@router.post("/{order_id}/cancel", response_model=Order,
+             dependencies=[Depends(require_roles("WAREHOUSE"))], summary="Anuluj RESERVED przed pakowaniem")
+def cancel_order(order_id: UUID, service: OrderServiceDep):
+    return service.cancel(order_id)
+
+
+@router.post("/{order_id}/sync-cancellation", response_model=Order,
+             dependencies=[Depends(require_roles("WAREHOUSE"))], summary="Ponow publikacje anulowania")
+def sync_cancellation(order_id: UUID, service: OrderServiceDep):
+    return service.sync_cancellation(order_id)
 
 
 @router.get("/{order_id}/shipping-check", response_model=Order, dependencies=[Depends(require_roles("SHIPPING"))])

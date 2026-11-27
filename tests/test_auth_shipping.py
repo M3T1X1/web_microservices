@@ -37,7 +37,6 @@ class Bridge:
         self.clients = {}
         self.calls = []
         self.errors = {}
-        self.lose_reservation_response = False
 
     async def do_service(self, name, path, **kwargs):
         self.calls.append((name, path, kwargs))
@@ -50,8 +49,6 @@ class Bridge:
                                   content=json.dumps(kwargs["data"]) if "data" in kwargs else None)
         if response.status_code >= 400:
             raise HTTPError(path, response.status_code, response.text, response.headers, None)
-        if path == "/reservations" and self.lose_reservation_response:
-            raise URLError("Lost response after successful reservation")
         return response.json()
 
 
@@ -93,8 +90,11 @@ def packed_order(world):
     order = response.json()
     path = f"/orders/{order['id']}"
     response = clients["outbound"].post(path + "/reserve", headers=warehouse)
-    assert response.status_code == 200, response.text
-    assert response.json()["status"] == "RESERVED"
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "RESERVATION_PENDING"
+    assert clients["inventory"].post('/reservations/consume-events', headers=warehouse).status_code == 200
+    assert clients["outbound"].post('/orders/consume-reservation-events', headers=warehouse).status_code == 200
+    assert clients["outbound"].get(path, headers=warehouse).json()['status'] == 'RESERVED'
     response = clients["outbound"].post(path + "/pack", headers=warehouse)
     assert response.status_code == 200
     return order
@@ -265,7 +265,7 @@ def test_lost_publish_confirmation_can_be_retried_without_double_dispatch(world,
     assert response.status_code == 200
     assert response.json()["notification_pending"] is False
     assert response.json()["handed_over_at"] == timestamp
-    assert broker.published[0][1]['event_id'] == broker.published[1][1]['event_id']
+    assert broker.published[-2][1]['event_id'] == broker.published[-1][1]['event_id']
     consumed = clients['outbound'].post('/orders/consume-events', headers=headers)
     assert consumed.json() == {'consumed_messages': 2, 'unique_events_processed': 1}
     assert clients['outbound'].get(f"/orders/{order['id']}", headers=tokens['WAREHOUSE']).json()['status'] == 'SHIPPED'
@@ -349,37 +349,66 @@ def test_shipping_dependency_errors_do_not_change_local_state(world):
         assert clients['shipping'].get('/health').status_code == 200
 
 
-def test_outbound_failed_reservation_stays_new_and_retry_does_not_double_reserve(world):
+def test_outbound_failed_publication_stays_pending_and_retry_does_not_double_reserve(world):
     clients, tokens, bridge, _ = world
     headers = tokens['WAREHOUSE']
     body = {'recipient_name': 'A', 'recipient_phone': '1', 'recipient_address': 'B',
             'items': [{'sku': 'SKU-001', 'quantity': 4}]}
     order = clients['outbound'].post('/orders', headers=headers, json=body).json()
     path = f"/orders/{order['id']}"
-    bridge.errors[('INVENTORY-SERVICE', '/reservations')] = URLError('offline')
+    broker = clients['outbound'].app.state.event_broker
+    broker.down = True
     assert clients['outbound'].post(path + '/reserve', headers=headers).status_code == 503
-    assert clients['outbound'].get(path, headers=headers).json()['status'] == 'NEW'
-    bridge.errors.clear()
+    assert clients['outbound'].get(path, headers=headers).json()['status'] == 'RESERVATION_PENDING'
+    broker.down = False
     for _ in range(2):
-        assert clients['outbound'].post(path + '/reserve', headers=headers).status_code == 200
+        assert clients['outbound'].post(path + '/reserve', headers=headers).status_code == 202
+    assert clients['inventory'].post('/reservations/consume-events', headers=headers).json()['consumed_messages'] == 1
+    assert clients['outbound'].post('/orders/consume-reservation-events', headers=headers).status_code == 200
     stock = clients['inventory'].get('/stocks', headers=headers).json()[0]
     assert stock['reservations'] == [{'order_id': order['id'], 'quantity': 4}]
 
 
-def test_lost_reservation_confirmation_is_safe_to_retry(world):
+def test_lost_request_publish_confirmation_is_safe_to_retry(world, monkeypatch):
     clients, tokens, bridge, _ = world
     headers = tokens['WAREHOUSE']
     order = clients['outbound'].post('/orders', headers=headers, json={
         'recipient_name': 'A', 'recipient_phone': '1', 'recipient_address': 'B',
         'items': [{'sku': 'SKU-001', 'quantity': 4}]}).json()
     path = f"/orders/{order['id']}"
-    bridge.lose_reservation_response = True
+    broker = clients['outbound'].app.state.event_broker
+    original = broker.publish
+    lost = [False]
+
+    def publish(key, payload):
+        original(key, payload)
+        if not lost[0]:
+            lost[0] = True
+            raise BrokerUnavailableError('Lost request confirmation')
+
+    monkeypatch.setattr(broker, 'publish', publish)
     assert clients['outbound'].post(path + '/reserve', headers=headers).status_code == 503
-    assert clients['outbound'].get(path, headers=headers).json()['status'] == 'NEW'
-    bridge.lose_reservation_response = False
-    assert clients['outbound'].post(path + '/reserve', headers=headers).status_code == 200
+    assert clients['outbound'].get(path, headers=headers).json()['status'] == 'RESERVATION_PENDING'
+    assert clients['outbound'].post(path + '/sync-reservation', headers=headers).status_code == 200
+    assert clients['inventory'].post('/reservations/consume-events', headers=headers).json() == {
+        'consumed_messages': 2, 'unique_events_processed': 1}
+    assert clients['outbound'].post('/orders/consume-reservation-events', headers=headers).status_code == 200
     stock = clients['inventory'].get('/stocks', headers=headers).json()[0]
     assert stock['reservations'] == [{'order_id': order['id'], 'quantity': 4}]
+
+
+def test_reservation_consumers_require_warehouse_role(world):
+    clients, tokens, _, _ = world
+    for client, path in ((clients['inventory'], '/reservations/consume-events'),
+                         (clients['inventory'], '/reservations/sync-events'),
+                         (clients['inventory'], '/reservations/consume-shipment-events'),
+                         (clients['outbound'], '/orders/consume-reservation-events')):
+        assert client.post(path).status_code == 401
+        assert client.post(path, headers=tokens['SHIPPING']).status_code == 403
+        assert client.post(path, headers=tokens['WAREHOUSE']).status_code == 200
+        assert client.post(path + '?limit=0', headers=tokens['WAREHOUSE']).status_code == 422
+        assert client.post(path + '?limit=501', headers=tokens['WAREHOUSE']).status_code == 422
+    assert clients['outbound'].post('/orders/consume-events', headers=tokens['WAREHOUSE']).status_code == 403
 
 
 def test_default_security_fails_closed_without_public_key(tmp_path, monkeypatch):

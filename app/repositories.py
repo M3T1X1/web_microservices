@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from uuid import UUID
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.db_models import OrderDispatchRow, OrderRow, ProcessedEventRow, ReceiptRow, StockRow
-from app.models.order import Order, OrderCreate
+from app.db_models import OrderDispatchRow, OrderRow, OutboxEventRow, ProcessedEventRow, ReceiptRow, ReservationBatchRow, StockRow
+from app.models.events import (OrderReservationRequested, OrderStockReserved, RESERVATION_REQUEST_KEY, reservation_request_id,
+                              OrderCancelled, CANCELLATION_ROUTING_KEY, cancellation_event_id)
+from app.models.order import Order, OrderCreate, normalized_items
 from app.models.receipt import Receipt, ReceiptCreate
 from app.models.stock import Reservation, Stock, StockUpdate
 
@@ -33,7 +36,9 @@ def stock_payload(row: StockRow) -> Stock:
 def order_payload(row: OrderRow) -> Order:
     return Order(id=row.id, recipient_name=row.recipient_name,
                  recipient_phone=row.recipient_phone, recipient_address=row.recipient_address,
-                 status=row.status, items=row.items)
+                 status=row.status, items=row.items, reservation_attempt_id=row.reservation_attempt_id,
+                 reservation_error=row.reservation_error,
+                 reservation_notification_pending=row.reservation_notification_pending)
 
 
 def receipt_payload(row: ReceiptRow) -> Receipt:
@@ -61,6 +66,9 @@ class StockRepository:
     def reserve(self, stock_id: UUID, reservation: Reservation) -> Reservation:
         with write_transaction(self.sessions) as db:
             row = self._find(db, stock_id, lock=True)
+            batch = db.get(ReservationBatchRow, reservation.order_id)
+            if batch is not None and batch.status in {"CONSUMED", "RELEASED"}:
+                raise HTTPException(409, "Order reservation has already been consumed or released")
             reserved = sum(item["quantity"] for item in row.reservations)
             if reservation.quantity > row.quantity - reserved:
                 raise HTTPException(409, "Insufficient available stock")
@@ -201,6 +209,78 @@ class OrderRepository:
     def dispatch(self, order_id, shipment_id):
         with write_transaction(self.sessions) as db:
             return self._dispatch(db, order_id, shipment_id)
+
+    def cancel(self, order_id):
+        with write_transaction(self.sessions) as db:
+            row = self._find(db, order_id, lock=True)
+            if row.status == "CANCELLED":
+                return order_payload(row)
+            if row.status != "RESERVED":
+                raise HTTPException(409, "Only RESERVED orders can be cancelled before packing")
+            event = OrderCancelled(event_id=cancellation_event_id(order_id), event_type="OrderCancelled",
+                                   order_id=order_id, items=normalized_items(row.items),
+                                   occurred_at=datetime.now(timezone.utc))
+            row.status = "CANCELLED"
+            db.add(OutboxEventRow(event_id=event.event_id, routing_key=CANCELLATION_ROUTING_KEY,
+                                 payload=event.model_dump(mode="json"), published=False))
+            return order_payload(row)
+
+    def start_reservation(self, order_id):
+        with write_transaction(self.sessions) as db:
+            row = self._find(db, order_id, lock=True)
+            if row.status in {"RESERVATION_PENDING", "RESERVED"}:
+                return order_payload(row)
+            if row.status not in {"NEW", "RESERVATION_REJECTED"}:
+                raise HTTPException(409, "Only NEW or RESERVATION_REJECTED orders can request reservation")
+            attempt_id = uuid4()
+            event = OrderReservationRequested(
+                event_id=reservation_request_id(attempt_id), event_type="OrderReservationRequested",
+                attempt_id=attempt_id, order_id=row.id, items=normalized_items(row.items),
+                occurred_at=datetime.now(timezone.utc))
+            row.status = "RESERVATION_PENDING"
+            row.reservation_attempt_id = attempt_id
+            row.reservation_error = None
+            row.reservation_notification_pending = True
+            db.add(OutboxEventRow(event_id=event.event_id, routing_key=RESERVATION_REQUEST_KEY,
+                                 payload=event.model_dump(mode="json"), published=False))
+            result = order_payload(row)
+        return result
+
+    def confirm_reservation_publication(self, order_id, attempt_id):
+        with write_transaction(self.sessions) as db:
+            row = self._find(db, order_id, lock=True)
+            if row.reservation_attempt_id == attempt_id:
+                outgoing = db.get(OutboxEventRow, reservation_request_id(attempt_id))
+                if outgoing is not None and outgoing.published:
+                    row.reservation_notification_pending = False
+            result = order_payload(row)
+        return result
+
+    def apply_reservation_result(self, event):
+        payload = event.model_dump(mode="json")
+        with write_transaction(self.sessions) as db:
+            previous = db.get(ProcessedEventRow, event.event_id)
+            if previous is not None:
+                if previous.payload != payload:
+                    raise HTTPException(409, "Event ID already processed with different data")
+                return False
+            row = self._find(db, event.order_id, lock=True)
+            applied = row.reservation_attempt_id == event.attempt_id
+            if applied:
+                if normalized_items(row.items) != normalized_items(event.items):
+                    raise HTTPException(409, "Reservation result differs from order items")
+                if row.status != "RESERVATION_PENDING":
+                    raise HTTPException(409, "Order is not awaiting this reservation result")
+                success = isinstance(event, OrderStockReserved)
+                row.status = "RESERVED" if success else "RESERVATION_REJECTED"
+                row.reservation_error = None if success else event.reason
+                row.reservation_notification_pending = False
+                outgoing = db.get(OutboxEventRow, reservation_request_id(event.attempt_id))
+                if outgoing is not None:
+                    outgoing.published = True  # Wynik dowodzi odbioru zlecenia przez Inventory.
+            # Stary wynik jest rozpoznany, ale nie zmienia nowszej proby zamowienia.
+            db.add(ProcessedEventRow(event_id=event.event_id, event_type=event.event_type, payload=payload))
+        return applied
 
     def apply_shipment_event(self, event):
         payload = event.model_dump(mode="json")

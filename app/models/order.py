@@ -21,4 +21,15 @@ class OrderCreate(BaseModel):
 
 class Order(OrderCreate):
     id: UUID = Field(default_factory=uuid4)
-    status: Literal["NEW", "RESERVED", "PACKED", "SHIPPED", "CANCELLED"] = "NEW"
+    status: Literal["NEW", "RESERVATION_PENDING", "RESERVATION_REJECTED", "RESERVED", "PACKED", "SHIPPED", "CANCELLED"] = "NEW"
+    reservation_attempt_id: UUID | None = None
+    reservation_error: str | None = None
+    reservation_notification_pending: bool = False
+
+
+def normalized_items(items):
+    totals = {}
+    for item in items:
+        sku, quantity = (item.sku, item.quantity) if isinstance(item, OrderItem) else (item["sku"], item["quantity"])
+        totals[sku] = totals.get(sku, 0) + quantity
+    return [{"sku": sku, "quantity": quantity} for sku, quantity in sorted(totals.items())]
